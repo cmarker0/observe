@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
 import { AsyncLocalStorage } from "async_hooks";
-import type { Job, Processor } from "bullmq";
+import type { Job } from "bullmq";
 import { ObserveAgentSharedBuffer } from "../agent/observe-agent.shared-buffer.js";
 import {
   JobSnapshot,
@@ -15,12 +15,13 @@ import {
   loadOptionalPeer,
 } from "../utils/optional-peer.util.js";
 
+/** A processor as a worker calls it - `(job, token, signal)` on current BullMQ. */
+type JobProcessor = (job: Job, ...rest: unknown[]) => unknown;
+
 /** The `ProcessorDecoratorService` surface this service patches, structurally typed. */
 interface ProcessorDecoratorServiceLike {
   prototype?: {
-    decorate?: (
-      processor: Processor<unknown, unknown>,
-    ) => (job: Job) => unknown;
+    decorate?: (processor: JobProcessor) => JobProcessor;
   };
 }
 
@@ -133,8 +134,12 @@ export class QueueObserveAgentService<Store extends Record<string, unknown>> {
       return;
     }
 
+    // The worker calls the processor with `(job, token, signal)`, and all of it
+    // is passed on: a processor that moves its own job (`moveToDelayed`,
+    // `extendLock`) needs the token to prove it holds the lock.
     ProcessorDecoratorService.prototype["decorate"] =
-      (processor: Processor<unknown, unknown>) => (job: Job) =>
+      (processor: JobProcessor) =>
+      (job: Job, ...rest: unknown[]) =>
         this.runner.run(
           {
             queueName: job.queueName,
@@ -143,7 +148,7 @@ export class QueueObserveAgentService<Store extends Record<string, unknown>> {
             opts: job.opts as Record<string, unknown> | undefined,
             metadata: this.readQueueMetadata(job),
           },
-          () => processor(job),
+          () => processor(job, ...rest),
         );
 
     this.patchQueue();

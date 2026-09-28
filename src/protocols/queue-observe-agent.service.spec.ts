@@ -1,6 +1,36 @@
 import { ProcessorDecoratorService } from "@nestjs/bullmq";
 import { AsyncLocalStorage } from "async_hooks";
+import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
 import { QueueObserveAgentService } from "./queue-observe-agent.service.js";
+
+const prototype = ProcessorDecoratorService.prototype as {
+  decorate?: unknown;
+};
+const originalDecorate = prototype.decorate;
+
+const createAgent = () =>
+  new QueueObserveAgentService(
+    {} as never,
+    { traceIdKey: "traceId" } as never,
+    {} as never,
+    new AsyncLocalStorage<Map<string, any>>(),
+  );
+
+/** An agent whose runner can open and close a trace for real. */
+const createTracingAgent = () => {
+  const als = new AsyncLocalStorage<Map<string, any>>();
+  return new QueueObserveAgentService(
+    { insertJobSnapshot: vi.fn() } as never,
+    { traceIdKey: "traceId" } as never,
+    new OperationTraceRegistry(als as never, false),
+    als,
+  );
+};
+
+afterEach(() => {
+  prototype.decorate = originalDecorate;
+  vi.restoreAllMocks();
+});
 
 /**
  * `@nestjs/bullmq` is an optional peer: the agent must patch the processor
@@ -9,24 +39,6 @@ import { QueueObserveAgentService } from "./queue-observe-agent.service.js";
  * present in this repository's own dependencies.
  */
 describe("QueueObserveAgentService", () => {
-  const prototype = ProcessorDecoratorService.prototype as {
-    decorate?: unknown;
-  };
-  const originalDecorate = prototype.decorate;
-
-  const createAgent = () =>
-    new QueueObserveAgentService(
-      {} as never,
-      { traceIdKey: "traceId" } as never,
-      {} as never,
-      new AsyncLocalStorage<Map<string, any>>(),
-    );
-
-  afterEach(() => {
-    prototype.decorate = originalDecorate;
-    vi.restoreAllMocks();
-  });
-
   it("patches the processor decorator when @nestjs/bullmq is installed", () => {
     createAgent();
 
@@ -44,5 +56,21 @@ describe("QueueObserveAgentService", () => {
 
     expect(() => createAgent()).not.toThrow();
     expect(prototype.decorate).toBe(originalDecorate);
+  });
+
+  it("hands the processor the lock token and abort signal the worker passed", async () => {
+    createTracingAgent();
+    const processor = vi.fn(async () => "done");
+    const signal = new AbortController().signal;
+
+    const decorated = (
+      prototype.decorate as (
+        processor: unknown,
+      ) => (...args: unknown[]) => Promise<unknown>
+    )(processor);
+    const job = { queueName: "emails", name: "welcome", id: "1" };
+    await decorated(job, "lock-token", signal);
+
+    expect(processor).toHaveBeenCalledWith(job, "lock-token", signal);
   });
 });
