@@ -109,3 +109,158 @@ describe("JobTraceRunner: jobs.ignore", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("bad predicate"));
   });
 });
+
+/**
+ * Two layers of instrumentation around one run: a BullMQ Pro worker, patched
+ * where it calls the processor, running a processor `@nestjs/bullmq` decorated
+ * as well. The inner layer has to join the run the outer one opened.
+ */
+describe("JobTraceRunner: a run nested in its own job's run", () => {
+  const TRACE_ID_KEY = "traceId";
+
+  let als: AsyncLocalStorage<Map<string, unknown>>;
+  let registry: OperationTraceRegistry;
+  let runner: JobTraceRunner<Record<string, unknown>>;
+
+  const job = (id: string | number): JobRunDescriptor => ({
+    queueName: "emails",
+    name: "welcome",
+    id,
+    metadata: {},
+  });
+
+  const observeRun = () => {
+    const store = als.getStore()!;
+    return {
+      traceId: store.get(TRACE_ID_KEY),
+      registryKey: store.get(TRACE_REGISTRY_KEY) as string | undefined,
+    };
+  };
+
+  beforeEach(() => {
+    als = new AsyncLocalStorage();
+    registry = new OperationTraceRegistry(als as never, false);
+    runner = new JobTraceRunner(
+      { insertJobSnapshot: vi.fn() } as unknown as ObserveAgentSharedBuffer,
+      { traceIdKey: TRACE_ID_KEY } as ObserveModuleOptionsWithDefaults,
+      registry,
+      als as never,
+      { warn: vi.fn(), debug: vi.fn() } as unknown as Logger,
+    );
+  });
+
+  it("runs inside the trace the outer layer opened, rather than hiding it", () => {
+    const [outer, inner] = runner.run(job("7"), () => [
+      observeRun(),
+      runner.run(job("7"), () => observeRun()),
+    ]);
+
+    expect(inner).toEqual(outer);
+    expect(registry.hasTrace(inner.registryKey!)).toBe(true);
+  });
+
+  it("recognises the job by queue and id, whatever type the id arrives as", () => {
+    const [outer, inner] = runner.run(job(7), () => [
+      observeRun(),
+      runner.run(job("7"), () => observeRun()),
+    ]);
+
+    expect(inner).toEqual(outer);
+  });
+
+  it("still isolates a different job that happens to start in that context", () => {
+    const inner = runner.run(job("7"), () =>
+      runner.run(job("8"), () => observeRun()),
+    );
+
+    expect(inner).toEqual({ traceId: undefined, registryKey: undefined });
+  });
+});
+
+describe("JobTraceRunner: patchEnqueue", () => {
+  const TRACE_ID_KEY = "traceId";
+
+  let als: AsyncLocalStorage<Map<string, unknown>>;
+  let runner: JobTraceRunner<Record<string, unknown>>;
+
+  beforeEach(() => {
+    als = new AsyncLocalStorage();
+    runner = new JobTraceRunner(
+      {} as ObserveAgentSharedBuffer,
+      { traceIdKey: TRACE_ID_KEY } as ObserveModuleOptionsWithDefaults,
+      {} as OperationTraceRegistry,
+      als as never,
+      { warn: vi.fn(), debug: vi.fn() } as unknown as Logger,
+    );
+  });
+
+  const inTrace = <T>(fn: () => T) =>
+    als.run(new Map([[TRACE_ID_KEY, "trace-1"]]), fn);
+
+  it("wraps a subclass's own add, not the original its parent parked", () => {
+    const baseAdd = vi.fn();
+    const proAdd = vi.fn();
+    class Queue {
+      add(...args: unknown[]) {
+        return baseAdd(...args);
+      }
+    }
+    // Overrides `add` without calling `super.add`, as `QueuePro` may.
+    class QueuePro extends Queue {
+      override add(...args: unknown[]) {
+        return proAdd(...args);
+      }
+    }
+    runner.patchEnqueue(Queue.prototype as never, () => 2);
+    runner.patchEnqueue(QueuePro.prototype as never, () => 2);
+
+    inTrace(() => new QueuePro().add("welcome", {}, { attempts: 3 }));
+
+    expect(baseAdd).not.toHaveBeenCalled();
+    expect(proAdd).toHaveBeenCalledWith(
+      "welcome",
+      {},
+      { attempts: 3, observeTraceId: "trace-1" },
+    );
+  });
+
+  it("stamps once when a subclass's add goes through super.add", () => {
+    const baseAdd = vi.fn();
+    class Queue {
+      add(...args: unknown[]) {
+        return baseAdd(...args);
+      }
+    }
+    class QueuePro extends Queue {
+      override add(...args: unknown[]) {
+        return super.add(...args);
+      }
+    }
+    runner.patchEnqueue(Queue.prototype as never, () => 2);
+    runner.patchEnqueue(QueuePro.prototype as never, () => 2);
+
+    inTrace(() => new QueuePro().add("welcome", {}));
+
+    expect(baseAdd).toHaveBeenCalledOnce();
+    expect(baseAdd).toHaveBeenCalledWith(
+      "welcome",
+      {},
+      { observeTraceId: "trace-1" },
+    );
+  });
+
+  it("replaces its own wrapper when patched again, rather than nesting it", () => {
+    const add = vi.fn();
+    class Queue {
+      add(...args: unknown[]) {
+        return add(...args);
+      }
+    }
+    runner.patchEnqueue(Queue.prototype as never, () => 2);
+    runner.patchEnqueue(Queue.prototype as never, () => 2);
+
+    inTrace(() => new Queue().add("welcome", {}));
+
+    expect(add).toHaveBeenCalledOnce();
+  });
+});

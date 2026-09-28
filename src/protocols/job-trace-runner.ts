@@ -37,6 +37,41 @@ interface QueuePrototypeLike {
 const ORIGINAL_ADD = Symbol.for("nestjs.observe.queue.add");
 const ORIGINAL_ADD_BULK = Symbol.for("nestjs.observe.queue.addBulk");
 
+/** Where a run records which job it is running, for a layer nested inside it. */
+const ACTIVE_JOB_KEY = Symbol("nestjs.observe.activeJob");
+
+interface ActiveJob {
+  queueName: string;
+  id: string;
+}
+
+/**
+ * The method a prototype had before any agent patched it, parked on that
+ * prototype under `key` the first time round, so a second agent (a second Nest
+ * app in one process, a test suite) replaces the wrapper instead of wrapping it
+ * again.
+ *
+ * Own properties only. A subclass prototype - `QueuePro` over BullMQ's `Queue` -
+ * would otherwise read the original its parent parked through the prototype
+ * chain, and the wrapper would call *that*, skipping the subclass's own
+ * override altogether.
+ */
+function parkOriginal(
+  prototype: QueuePrototypeLike,
+  key: symbol,
+  method: "add" | "addBulk",
+): unknown {
+  if (!Object.prototype.hasOwnProperty.call(prototype, key)) {
+    prototype[key] = prototype[method];
+  }
+  return prototype[key];
+}
+
+function isSameJob(outer: unknown, job: ActiveJob): boolean {
+  const active = outer as ActiveJob | undefined;
+  return active?.queueName === job.queueName && active.id === job.id;
+}
+
 /**
  * The part of job tracing that is the same whichever driver runs the queue:
  * stamping the active trace id onto a job as it is enqueued, and opening the
@@ -61,9 +96,7 @@ export class JobTraceRunner<Store extends Record<string, unknown>> {
    * Makes `add` and `addBulk` carry the enqueuing operation's trace id, so the
    * run reports under the request - or job, or cron firing - that caused it.
    *
-   * The originals are parked on the prototype under a symbol: a second agent
-   * (a second Nest app in one process, a test suite) replaces the wrapper
-   * instead of wrapping it again.
+   * The originals are parked on the prototype itself (see `parkOriginal`).
    */
   patchEnqueue(
     prototype: QueuePrototypeLike,
@@ -72,7 +105,7 @@ export class JobTraceRunner<Store extends Record<string, unknown>> {
   ) {
     const stamp = (opts: unknown) => this.stampTraceId(opts);
 
-    const originalAdd = (prototype[ORIGINAL_ADD] ??= prototype.add) as
+    const originalAdd = parkOriginal(prototype, ORIGINAL_ADD, "add") as
       | QueuePrototypeLike["add"]
       | undefined;
     if (typeof originalAdd === "function") {
@@ -86,8 +119,11 @@ export class JobTraceRunner<Store extends Record<string, unknown>> {
       };
     }
 
-    const originalAddBulk = (prototype[ORIGINAL_ADD_BULK] ??=
-      prototype.addBulk) as QueuePrototypeLike["addBulk"] | undefined;
+    const originalAddBulk = parkOriginal(
+      prototype,
+      ORIGINAL_ADD_BULK,
+      "addBulk",
+    ) as QueuePrototypeLike["addBulk"] | undefined;
     if (typeof originalAddBulk === "function") {
       prototype.addBulk = function (this: unknown, jobs: any[]) {
         if (!Array.isArray(jobs)) {
@@ -146,6 +182,19 @@ export class JobTraceRunner<Store extends Record<string, unknown>> {
   }
 
   /**
+   * What identifies the run to a layer nested inside it: the queue and the
+   * job id, rather than the job object, which a driver is free to wrap or
+   * rebuild on its way to the processor. A retry is a later run, never a
+   * nested one, so the two cannot be told apart by accident. A run without
+   * an id has nothing to be recognised by.
+   */
+  private activeJobOf(job: JobRunDescriptor): ActiveJob | undefined {
+    return job.id === undefined
+      ? undefined
+      : { queueName: job.queueName, id: String(job.id) };
+  }
+
+  /**
    * Whether `jobs.ignore` matches this run. A predicate that throws is
    * reported and read as "trace it": a bug in tracing configuration must not
    * stop the job itself from running.
@@ -174,13 +223,29 @@ export class JobTraceRunner<Store extends Record<string, unknown>> {
     invoke: (settle: (status: JobStatus) => void) => T,
     settlesItself = false,
   ): T {
-    const hasOuterContext = this.asyncLocalStorage
-      .getStore()
-      ?.has(this.options.traceIdKey);
+    const outerStore = this.asyncLocalStorage.getStore();
+    const activeJob = this.activeJobOf(job);
+
+    // A second layer of instrumentation around a run that is already open -
+    // a BullMQ Pro worker whose processor `@nestjs/bullmq` decorated as well.
+    // The layer that saw the job first owns the trace; this one runs the job
+    // inside it. Taking the branch below instead would hide that trace behind
+    // an empty store, and the run would report without a single span.
+    if (
+      activeJob &&
+      isSameJob(outerStore?.get(ACTIVE_JOB_KEY as KeyOf<Store>), activeJob)
+    ) {
+      return invoke(() => undefined);
+    }
+
+    const hasOuterContext = outerStore?.has(this.options.traceIdKey);
 
     // The same map `run` is given, rather than `getStore()` inside the
     // callback: identical object, one lookup fewer, and it is known to exist.
     const store = new Map<KeyOf<Store>, any>();
+    if (activeJob) {
+      store.set(ACTIVE_JOB_KEY as KeyOf<Store>, activeJob);
+    }
     return this.asyncLocalStorage.run(store, () => {
       if (hasOuterContext) {
         // If the outer context already has a trace ID

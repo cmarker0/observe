@@ -27,7 +27,8 @@ and methods, not just HTTP routes.
 Install it, set two environment variables, and the application starts reporting:
 
 - **Requests, jobs and RPC calls** — HTTP, GraphQL, microservices (RPC/gRPC),
-  BullMQ consumers and `@nestjs/schedule` cron, interval and timeout jobs.
+  BullMQ (and BullMQ Pro) consumers and `@nestjs/schedule` cron, interval and
+  timeout jobs.
 - **Distributed traces** with per-span self time, correlated across services.
 - **Errors**, grouped by fingerprint, with the source frame and the trace that
   produced them.
@@ -208,7 +209,7 @@ Once the module and the instrument are in place, the agent reports, with no furt
 - **Requests, GraphQL operations, RPC messages, WebSocket gateway messages, queue jobs and scheduled jobs**, each with its tree of provider method calls.
 - **Database queries**, as a span under the method that ran them, for `pg`, `mysql2` and `mongodb`. Anything built on those drivers is covered without being known by name: TypeORM, Drizzle, MikroORM and Mongoose are tested in this repository, and others (Knex, Sequelize) go through the same driver calls. The statement is recorded with every value removed (`SELECT "o"."id" FROM "orders" "o" WHERE "o"."customer_id" = $1`). Prisma's Rust query engine does not go through these drivers and is not covered yet.
 - **Outbound HTTP calls** made with `fetch`/`undici` or `node:http`/`https` (so Axios too), as `POST api.stripe.com`. The current trace id is forwarded as `x-request-id`, so a service that also runs the agent continues the same trace; a header you set yourself is never overwritten.
-- **Trace ids across queues**: a BullMQ or Bull job enqueued while handling a request carries that request's trace id, so the request and its job show up as one trace. Repeatable (cron) jobs start their own.
+- **Trace ids across queues**: a BullMQ (Pro included) or Bull job enqueued while handling a request carries that request's trace id, so the request and its job show up as one trace. Repeatable (cron) jobs start their own.
 
 Query and outbound-HTTP spans are not billed as events. Turn them off with `outgoing: false`, or one side with `outgoing: { database: false }` / `outgoing: { http: false }`.
 
@@ -244,6 +245,7 @@ Protocol integrations are only loaded when you use them, and their packages are 
 - `@nestjs/microservices` - RPC/microservice instrumentation
 - `@nestjs/graphql` - GraphQL operation instrumentation
 - `@nestjs/bullmq` and `bullmq` - queue/job instrumentation
+- `@taskforcesh/bullmq-pro` - the same, for BullMQ Pro, whether it is wired in through `@taskforcesh/nestjs-bullmq-pro` or through `@nestjs/bullmq` (`BullModule.workerClass = WorkerPro`)
 - `@nestjs/bull` and `bull` - the same, for legacy Bull
 - `@nestjs/websockets` - WebSocket gateway instrumentation (`ws` and socket.io adapters)
 - `@nestjs/schedule` - scheduled job (`@Cron`, `@Interval`, `@Timeout`) instrumentation

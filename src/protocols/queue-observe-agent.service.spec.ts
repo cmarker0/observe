@@ -1,3 +1,4 @@
+import { Logger } from "@nestjs/common";
 import { ProcessorDecoratorService } from "@nestjs/bullmq";
 import { AsyncLocalStorage } from "async_hooks";
 import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
@@ -26,6 +27,10 @@ const createTracingAgent = () => {
     als,
   );
 };
+
+/** A method read off a prototype as a plain value, to compare identities. */
+const methodOf = (target: object, name: string) =>
+  (target as Record<string, unknown>)[name];
 
 afterEach(() => {
   prototype.decorate = originalDecorate;
@@ -72,5 +77,102 @@ describe("QueueObserveAgentService", () => {
     await decorated(job, "lock-token", signal);
 
     expect(processor).toHaveBeenCalledWith(job, "lock-token", signal);
+  });
+});
+
+/**
+ * `@taskforcesh/bullmq-pro` lives on a private registry and is never installed
+ * here, so these hand the agent stand-ins shaped like it: classes extending
+ * BullMQ's own, the worker calling the processor from the `callProcessJob` it
+ * inherits.
+ */
+describe("QueueObserveAgentService: BullMQ Pro", () => {
+  const ORIGINAL_CALL_PROCESS_JOB = Symbol.for(
+    "nestjs.observe.bullmqPro.callProcessJob",
+  );
+
+  const stubBullMQPro = (module: unknown) =>
+    vi
+      .spyOn(
+        QueueObserveAgentService.prototype as unknown as {
+          loadBullMQPro: () => unknown;
+        },
+        "loadBullMQPro",
+      )
+      .mockReturnValue(module);
+
+  const createProClasses = () => {
+    class Worker {
+      callProcessJob(job: unknown, token: string) {
+        return [job, token];
+      }
+    }
+    class WorkerPro extends Worker {}
+    class QueuePro {
+      add() {}
+      addBulk() {}
+    }
+    return { Worker, WorkerPro, QueuePro };
+  };
+
+  it("patches the Pro worker and queue when @taskforcesh/bullmq-pro is installed", () => {
+    const { Worker, WorkerPro, QueuePro } = createProClasses();
+    const add = methodOf(QueuePro.prototype, "add");
+    const addBulk = methodOf(QueuePro.prototype, "addBulk");
+    stubBullMQPro({ WorkerPro, QueuePro });
+
+    createAgent();
+
+    expect(Object.hasOwn(WorkerPro.prototype, "callProcessJob")).toBe(true);
+    expect(methodOf(WorkerPro.prototype, "callProcessJob")).not.toBe(
+      methodOf(Worker.prototype, "callProcessJob"),
+    );
+    // BullMQ's own worker is left to `@nestjs/bullmq`'s decorator.
+    expect(Object.hasOwn(Worker.prototype, ORIGINAL_CALL_PROCESS_JOB)).toBe(
+      false,
+    );
+    expect(methodOf(QueuePro.prototype, "add")).not.toBe(add);
+    expect(methodOf(QueuePro.prototype, "addBulk")).not.toBe(addBulk);
+  });
+
+  it("replaces its worker patch when a second agent starts, rather than wrapping it again", () => {
+    const { Worker, WorkerPro, QueuePro } = createProClasses();
+    stubBullMQPro({ WorkerPro, QueuePro });
+
+    createAgent();
+    const first = methodOf(WorkerPro.prototype, "callProcessJob");
+    createAgent();
+
+    expect(methodOf(WorkerPro.prototype, "callProcessJob")).not.toBe(first);
+    expect(
+      (WorkerPro.prototype as unknown as Record<symbol, unknown>)[
+        ORIGINAL_CALL_PROCESS_JOB
+      ],
+    ).toBe(methodOf(Worker.prototype, "callProcessJob"));
+  });
+
+  it("says so, and still patches the queue, when WorkerPro has no callProcessJob", () => {
+    const { QueuePro } = createProClasses();
+    const add = methodOf(QueuePro.prototype, "add");
+    stubBullMQPro({ WorkerPro: class WorkerPro {}, QueuePro });
+    const warn = vi
+      .spyOn(Logger.prototype, "warn")
+      .mockImplementation(() => {});
+
+    createAgent();
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("callProcessJob is not available"),
+    );
+    expect(methodOf(QueuePro.prototype, "add")).not.toBe(add);
+  });
+
+  it("stays silent when @taskforcesh/bullmq-pro is not installed", () => {
+    const warn = vi
+      .spyOn(Logger.prototype, "warn")
+      .mockImplementation(() => {});
+
+    expect(() => createAgent()).not.toThrow();
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("Pro"));
   });
 });

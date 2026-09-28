@@ -9,7 +9,7 @@ import {
 import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
 import { KeyOf } from "../types/key-of.type.js";
 import { OBSERVE_OPTIONS } from "../observe.constants.js";
-import { JobTraceRunner } from "./job-trace-runner.js";
+import { JobRunDescriptor, JobTraceRunner } from "./job-trace-runner.js";
 import {
   describePeerLoadError,
   loadOptionalPeer,
@@ -25,6 +25,25 @@ interface ProcessorDecoratorServiceLike {
   };
 }
 
+interface WorkerProPrototypeLike {
+  callProcessJob?: JobProcessor;
+  [key: symbol]: unknown;
+}
+
+/** The `@taskforcesh/bullmq-pro` classes this service patches, structurally typed. */
+interface BullMQProLike {
+  WorkerPro?: { prototype?: WorkerProPrototypeLike };
+  QueuePro?: { prototype?: Record<string | symbol, unknown> };
+}
+
+const ORIGINAL_CALL_PROCESS_JOB = Symbol.for(
+  "nestjs.observe.bullmqPro.callProcessJob",
+);
+
+/**
+ * Job tracing for BullMQ: through `@nestjs/bullmq`'s processor decorator, and
+ * for BullMQ Pro through its worker, whichever package wires it into Nest.
+ */
 @Injectable()
 export class QueueObserveAgentService<Store extends Record<string, unknown>> {
   private readonly logger = new Logger(QueueObserveAgentService.name);
@@ -45,6 +64,17 @@ export class QueueObserveAgentService<Store extends Record<string, unknown>> {
       this.logger,
     );
     this.patchDecorate();
+    this.patchBullMQPro();
+  }
+
+  private describeJob(job: Job): JobRunDescriptor {
+    return {
+      queueName: job.queueName,
+      name: job.name,
+      id: job.id,
+      opts: job.opts as Record<string, unknown> | undefined,
+      metadata: this.readQueueMetadata(job),
+    };
   }
 
   /**
@@ -140,16 +170,7 @@ export class QueueObserveAgentService<Store extends Record<string, unknown>> {
     ProcessorDecoratorService.prototype["decorate"] =
       (processor: JobProcessor) =>
       (job: Job, ...rest: unknown[]) =>
-        this.runner.run(
-          {
-            queueName: job.queueName,
-            name: job.name,
-            id: job.id,
-            opts: job.opts as Record<string, unknown> | undefined,
-            metadata: this.readQueueMetadata(job),
-          },
-          () => processor(job, ...rest),
-        );
+        this.runner.run(this.describeJob(job), () => processor(job, ...rest));
 
     this.patchQueue();
   }
@@ -177,5 +198,98 @@ export class QueueObserveAgentService<Store extends Record<string, unknown>> {
     }
     // add(name, data, opts)
     this.runner.patchEnqueue(prototype, () => 2);
+  }
+
+  /**
+   * Loads `@taskforcesh/bullmq-pro` - an optional peer, published only to
+   * Taskforce's own registry - the same way as the packages above.
+   *
+   * Returns `undefined` both when it is not installed, which is the normal
+   * case, and when it is installed but cannot be loaded, which is said out
+   * loud.
+   */
+  private loadBullMQPro(): BullMQProLike | undefined {
+    const result = loadOptionalPeer<BullMQProLike>("@taskforcesh/bullmq-pro");
+    if (!result.installed) {
+      return undefined;
+    }
+    if (!result.module) {
+      this.logger.warn(
+        `@taskforcesh/bullmq-pro is installed but could not be loaded, so BullMQ Pro jobs will not be instrumented${result.error ? `: ${describePeerLoadError(result.error)}` : "."}`,
+      );
+      return undefined;
+    }
+    return result.module;
+  }
+
+  /**
+   * BullMQ Pro, whichever way it is wired into Nest.
+   *
+   * `@taskforcesh/nestjs-bullmq-pro` is a fork of `@nestjs/bullmq` from before
+   * the processor decorator existed: its explorer hands `process` straight to
+   * a `WorkerPro`, and there is no seam on the Nest side to patch. The worker
+   * is patched instead. Every job a `WorkerPro` runs goes through the
+   * `callProcessJob` it inherits from BullMQ's `Worker`, so one patch covers
+   * the fork, `@nestjs/bullmq` told to build Pro workers
+   * (`BullModule.workerClass`), and a worker built by hand - without depending
+   * on anybody's explorer. Where `@nestjs/bullmq` decorated the processor too,
+   * the runner recognises the job it is already running and opens no second
+   * trace.
+   *
+   * `QueuePro` overrides `add` and `addBulk`, and an override need not go
+   * through `Queue.prototype.add`, so the enqueuing half is patched on
+   * `QueuePro` itself.
+   */
+  private patchBullMQPro() {
+    const bullmqPro = this.loadBullMQPro();
+    if (!bullmqPro) {
+      return;
+    }
+    this.patchWorkerPro(bullmqPro.WorkerPro?.prototype);
+
+    const queuePrototype = bullmqPro.QueuePro?.prototype;
+    if (!queuePrototype) {
+      this.logger.warn(
+        "@taskforcesh/bullmq-pro does not expose QueuePro, so BullMQ Pro jobs will not inherit the trace that enqueued them.",
+      );
+      return;
+    }
+    // add(name, data, opts)
+    this.runner.patchEnqueue(queuePrototype, () => 2);
+  }
+
+  private patchWorkerPro(prototype: WorkerProPrototypeLike | undefined) {
+    // Parked as an own property, like the queue's originals: a second agent
+    // replaces the wrapper instead of wrapping it again.
+    if (
+      prototype &&
+      !Object.prototype.hasOwnProperty.call(
+        prototype,
+        ORIGINAL_CALL_PROCESS_JOB,
+      )
+    ) {
+      prototype[ORIGINAL_CALL_PROCESS_JOB] = prototype.callProcessJob;
+    }
+    const original = prototype?.[ORIGINAL_CALL_PROCESS_JOB];
+    if (!prototype || typeof original !== "function") {
+      this.logger.warn(
+        "BullMQ Pro's WorkerPro.prototype.callProcessJob is not available, so BullMQ Pro jobs will not be instrumented.",
+      );
+      return;
+    }
+
+    const runner = this.runner;
+    const describe = (job: Job) => this.describeJob(job);
+    prototype.callProcessJob = function (
+      this: unknown,
+      job: Job,
+      ...rest: unknown[]
+    ) {
+      // Nothing to describe; instrumentation must never be why a run fails.
+      if (typeof job !== "object" || job === null) {
+        return original.call(this, job, ...rest);
+      }
+      return runner.run(describe(job), () => original.call(this, job, ...rest));
+    };
   }
 }
