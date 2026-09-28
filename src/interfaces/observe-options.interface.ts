@@ -341,6 +341,41 @@ export interface ObserveOptions {
       };
 
   /**
+   * Reports an operation without its spans when it ends with one of these
+   * status codes - or, given a function, whenever that function returns true.
+   *
+   * Meant for outcomes that are part of an application's ordinary control
+   * flow: a `NotFoundException` for a record that does not exist, a 401 for an
+   * expired token, a 400 from a `ValidationPipe`. Every span is a metered
+   * event, and the waterfall behind a request that was turned away on purpose
+   * is rarely one anybody opens.
+   *
+   * The operation itself is still reported - its route, status code, duration,
+   * user and error - so it stays in every chart and on the Errors page, stack
+   * included. What is left behind is the span tree underneath it, manual spans
+   * too: the waterfall shows the operation with nothing inside it, and the
+   * calls it made are missing from the per-method numbers. That tree is the
+   * saving - each of its nodes is an event, so a skipped operation costs its
+   * own event (plus its error's, when it failed with one) and nothing more.
+   *
+   * The status code is the one the operation is reported with. Transports
+   * without one of their own - microservices, gRPC, WebSocket gateways -
+   * carry a status only when the handler threw: a Nest exception's own 4xx,
+   * 500 for anything else. So `[404]` also skips the spans of a message
+   * handler that threw `NotFoundException`. Jobs always keep their spans.
+   *
+   * Decided once the operation has finished, since the outcome is not known
+   * before: spans are still recorded while it runs, and dropped before
+   * anything is serialized or sent. A function that throws is reported once
+   * and read as "keep the spans".
+   *
+   * @example [400, 401, 403, 404]
+   * @example ({ statusCode, duration }) => statusCode === 404 && duration < 1000
+   * @default undefined - every operation ships its spans
+   */
+  skipSpans?: number[] | ((operation: SkipSpansContext) => boolean);
+
+  /**
    * Whether to forward logs to the Observe APM.
    * If true, logs will be forwarded to the Agent for correlation with traces.
    * @default false
@@ -699,6 +734,35 @@ export interface JobContext {
    * scheduled handler, where it identifies this particular firing.
    */
   id: string | undefined;
+}
+
+/** What a `skipSpans` function is told about the operation that finished. */
+export interface SkipSpansContext {
+  /**
+   * The transport, as reported: `http` or `https`, `graphql` for an operation
+   * that arrived without an HTTP request, `ws` for a gateway message, or the
+   * microservice transport's name (`TCP`, `GRPC`, ...).
+   */
+  protocol: string;
+  /**
+   * The route, message pattern, gateway pattern or GraphQL root field.
+   * Absent when none was resolved.
+   */
+  operationId: string | undefined;
+  /** The HTTP method. Absent off HTTP. */
+  method: string | undefined;
+  /**
+   * The status the operation is reported with. See `skipSpans` for where it
+   * comes from on transports that have none of their own.
+   */
+  statusCode: number | undefined;
+  /** How long the operation took, in milliseconds. */
+  duration: number;
+  /**
+   * Class name of the exception the operation failed with, e.g.
+   * `NotFoundException`. Absent when it did not fail with one.
+   */
+  errorClass: string | undefined;
 }
 
 /** What a `ws` option hook is told about the message being handled. */

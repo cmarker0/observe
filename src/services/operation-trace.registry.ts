@@ -19,6 +19,7 @@ import {
   DEFAULT_SPAN_COLLAPSE,
   SpanCollapseSettings,
 } from "./collapse-repeated-spans.util.js";
+import { SkipSpansPredicate } from "./skip-spans.util.js";
 
 const SNAPSHOT_COMPLETION_TIMEOUT_MS = 1000;
 
@@ -79,6 +80,15 @@ export class OperationTraceRegistry {
   private spanCollapse: SpanCollapseSettings | undefined =
     DEFAULT_SPAN_COLLAPSE;
   /**
+   * `skipSpans`, resolved. Undefined - the default - ships every tree.
+   */
+  private skipSpans: SkipSpansPredicate | undefined;
+  /**
+   * A `skipSpans` function that throws does so on every request, so the
+   * failure is reported once rather than once per request.
+   */
+  private hasReportedSkipSpansFailure = false;
+  /**
    * Scrubs error messages and stacks before they are attached to a span.
    *
    * On by default, with the same defaults the log forwarder uses, for the
@@ -105,6 +115,15 @@ export class OperationTraceRegistry {
    */
   configureSpanCollapse(settings: SpanCollapseSettings | undefined): void {
     this.spanCollapse = settings;
+  }
+
+  /**
+   * Sets which finished operations ship without their spans, or none with
+   * `undefined`. Called by the module alongside `configureSpanCollapse`, for
+   * the same reason.
+   */
+  configureSkipSpans(predicate: SkipSpansPredicate | undefined): void {
+    this.skipSpans = predicate;
   }
 
   /**
@@ -700,6 +719,14 @@ export class OperationTraceRegistry {
       delete bookkeeping.refsMarkedAsComplete;
       delete bookkeeping.errorStatusCode;
 
+      // Emptied rather than removed: the collector requires the field, and an
+      // empty tree is what it already stores for a trace it sampled out - the
+      // operation keeps its row, its error and every chart it feeds.
+      if (this.shouldSkipSpans(snapshot)) {
+        snapshot.traces = [];
+        return snapshot;
+      }
+
       // Last, on the finished tree: every span has closed by now, so a group
       // is judged on its complete membership and durations, and nothing that
       // reads the tree afterwards - the encoder, the buffer - sees the
@@ -713,6 +740,38 @@ export class OperationTraceRegistry {
       return snapshot;
     }
     return undefined;
+  }
+
+  /**
+   * Whether `skipSpans` claims a finished operation. Only request snapshots
+   * are asked: a job has no status to be judged by.
+   *
+   * Asked once the snapshot is complete, so the rule sees the status and the
+   * error the operation is reported with. A rule that throws keeps the spans:
+   * a mistake in it must not cost the application its traces.
+   */
+  private shouldSkipSpans(snapshot: RequestSnapshot | JobSnapshot): boolean {
+    if (!this.skipSpans || !("protocol" in snapshot)) {
+      return false;
+    }
+    try {
+      return this.skipSpans({
+        protocol: snapshot.protocol,
+        operationId: snapshot.operationId,
+        method: snapshot.attributes?.method,
+        statusCode: snapshot.attributes?.statusCode,
+        duration: snapshot.duration ?? 0,
+        errorClass: snapshot.error?.cls,
+      });
+    } catch (error) {
+      if (!this.hasReportedSkipSpansFailure) {
+        this.hasReportedSkipSpansFailure = true;
+        this.logger.warn(
+          `"skipSpans" threw for "${snapshot.operationId ?? snapshot.protocol}"; keeping its spans. Later failures are not reported: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      return false;
+    }
   }
 
   getActiveSpan(

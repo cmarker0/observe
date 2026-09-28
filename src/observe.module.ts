@@ -37,6 +37,7 @@ import { LoggerPatcherService } from "./services/logger-patcher.service.js";
 import { NodeRuntimeMetricsService } from "./services/node-runtime-metrics.service.js";
 import { resolveSpanCollapseSettings } from "./services/collapse-repeated-spans.util.js";
 import { OperationTraceRegistry } from "./services/operation-trace.registry.js";
+import { resolveSkipSpans } from "./services/skip-spans.util.js";
 import { StdoutForwarderService } from "./services/stdout-forwarder.service.js";
 import { TraceSamplerService } from "./services/trace-sampler.service.js";
 import { TracerService } from "./services/tracer.service.js";
@@ -90,12 +91,16 @@ export function createObserveModule<Store extends Record<string, unknown>>(
         provide: OperationTraceRegistry,
         // The instance already exists (the instrumentation hook below holds
         // it), so this is the one moment the resolved `ObserveOptions` and the
-        // registry meet: `spanCollapse` and `redaction` are applied here.
+        // registry meet: `spanCollapse`, `skipSpans` and `redaction` are
+        // applied here.
         // Optional because `ASSERT_MODULE_OPTIONS` owns the missing-options
         // error.
         useFactory: (observeOptions?: ObserveModuleOptionsWithDefaults) => {
           operationTraceRegistry.configureSpanCollapse(
             resolveSpanCollapseSettings(observeOptions?.spanCollapse),
+          );
+          operationTraceRegistry.configureSkipSpans(
+            resolveSkipSpans(observeOptions?.skipSpans),
           );
           operationTraceRegistry.configureRedaction(
             observeOptions?.redaction?.enabled === false

@@ -202,6 +202,41 @@ children, `s` spanId and `so` startOffset. A collector that does not know the
 tag stores it like any other and attributes the node as one call of its class
 rather than as the number it carries.
 
+## Skipping spans for expected outcomes
+
+Nest applications answer "not found", "not allowed" and "invalid input" by
+throwing - `NotFoundException`, `ForbiddenException`, a `ValidationPipe`'s
+`BadRequestException` - and every one of those requests ships the full tree of
+calls it made, each span a metered event. `skipSpans` reports such requests
+without their spans:
+
+```ts
+ObserveModule.forRoot({
+  // ...
+  skipSpans: [400, 401, 403, 404],
+  // or decide per operation:
+  // skipSpans: ({ statusCode, duration }) => statusCode === 404 && duration < 1000,
+});
+```
+
+What stays and what goes:
+
+- The request is still reported - route, status code, duration, user - so it
+  counts in every chart as before.
+- Its error is still reported, stack included, so it appears on the Errors page
+  exactly as it did.
+- The span tree underneath it is dropped before anything is serialized or
+  sent: the waterfall shows the request with nothing inside it, and its calls
+  are missing from the per-method numbers. A skipped request costs its own
+  event, plus its error's when it failed with one, and nothing more.
+
+The status code is the one the request is reported with. Microservice, gRPC and
+WebSocket handlers have no status of their own; they get one when they throw -
+a Nest exception's own 4xx, or 500 - so `[404]` covers a message handler that
+threw `NotFoundException` too. Jobs always keep their spans. The function form
+is told `protocol`, `operationId`, `method`, `statusCode`, `duration` and
+`errorClass`; if it throws, the spans are kept and the failure is logged once.
+
 ## What it records without any code
 
 Once the module and the instrument are in place, the agent reports, with no further changes to your application:

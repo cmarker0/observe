@@ -2,6 +2,8 @@ import {
   BadRequestException,
   InternalServerErrorException,
   IntrinsicException,
+  Logger,
+  NotFoundException,
 } from "@nestjs/common";
 import { AsyncLocalStorage } from "async_hooks";
 import { RequestSnapshot } from "../interfaces/request-snapshot.interface.js";
@@ -12,6 +14,7 @@ import {
 } from "../profiling/span-slice-recorder.js";
 import { SPAN_COLLAPSED_TAG } from "./collapse-repeated-spans.util.js";
 import { OperationTraceRegistry } from "./operation-trace.registry.js";
+import { resolveSkipSpans } from "./skip-spans.util.js";
 
 /**
  * The registry holds one in-flight snapshot per trace and assembles the span
@@ -1052,6 +1055,158 @@ describe("OperationTraceRegistry", () => {
       expect(countOf(pipes.find((pipe) => countOf(pipe) !== undefined)!)).toBe(
         22,
       );
+    });
+  });
+
+  /**
+   * `skipSpans` exists to stop billing for the spans of requests turned away
+   * on purpose - a 404 for a record that does not exist. What must hold is
+   * that only the tree goes: the operation's row, status and error are what
+   * the charts and the Errors page are built from.
+   */
+  describe("skipped spans", () => {
+    /** A root span with one child under it, the root failing with `error`. */
+    const failWith = (traceId: string, error?: unknown) => {
+      const rootId = registry.internalStartTraceStep(
+        traceId,
+        "ContactsController",
+        "findOne",
+        undefined,
+      );
+      const childId = registry.internalStartTraceStep(
+        traceId,
+        "ContactsService",
+        "findOne",
+        rootId,
+      );
+      registry.internalEndTraceStep(
+        traceId,
+        childId,
+        "ContactsService",
+        "findOne",
+        childId,
+        error as never,
+      );
+      registry.internalEndTraceStep(
+        traceId,
+        rootId,
+        "ContactsController",
+        "findOne",
+        rootId,
+        error as never,
+      );
+    };
+
+    it("ships a request that ended with a listed status without its spans, but with its error", async () => {
+      registry.configureSkipSpans(resolveSkipSpans([404]));
+      startRequest("s1");
+      failWith("s1", new NotFoundException("Contact not found"));
+      registry.endTrace("s1", { statusCode: 404, userId: "u-1" });
+
+      const snapshot = (await registry.pluckSnapshot("s1")) as RequestSnapshot;
+
+      expect(snapshot.traces).toEqual([]);
+      expect(snapshot.attributes?.statusCode).toBe(404);
+      expect(snapshot.userId).toBe("u-1");
+      expect(snapshot.duration).toEqual(expect.any(Number));
+      expect(snapshot.error).toMatchObject({
+        cls: "NotFoundException",
+        message: "Contact not found",
+      });
+    });
+
+    it("keeps the spans of a status the list does not name", async () => {
+      registry.configureSkipSpans(resolveSkipSpans([404]));
+      startRequest("s2");
+      failWith("s2");
+      registry.endTrace("s2", { statusCode: 200 });
+
+      const snapshot = await registry.pluckSnapshot("s2");
+
+      expect(snapshot!.traces).toHaveLength(1);
+    });
+
+    it("tells a function what the operation finished as, and follows its answer", async () => {
+      const rule = vi.fn(() => false);
+      registry.configureSkipSpans(rule);
+      startRequest("s3");
+      failWith("s3", new NotFoundException());
+      registry.endTrace("s3", { statusCode: 404 });
+
+      const snapshot = await registry.pluckSnapshot("s3");
+
+      expect(rule).toHaveBeenCalledWith({
+        protocol: "http",
+        operationId: "GET /orders",
+        method: "GET",
+        statusCode: 404,
+        duration: expect.any(Number),
+        errorClass: "NotFoundException",
+      });
+      expect(snapshot!.traces).toHaveLength(1);
+    });
+
+    it("judges a transport without a status of its own by the status its exception earned", async () => {
+      registry.configureSkipSpans(resolveSkipSpans([404]));
+      const startRpc = (traceId: string) =>
+        registry.startTrace(traceId, {
+          operationId: "contacts.find",
+          protocol: "TCP",
+          tags: {},
+        });
+
+      startRpc("s4");
+      failWith("s4", new NotFoundException());
+      registry.endTrace("s4");
+      const failed = (await registry.pluckSnapshot("s4")) as RequestSnapshot;
+
+      startRpc("s5");
+      failWith("s5");
+      registry.endTrace("s5");
+      const succeeded = await registry.pluckSnapshot("s5");
+
+      expect(failed.traces).toEqual([]);
+      expect(failed.attributes?.statusCode).toBe(404);
+      // No status at all: nothing for a list of status codes to match.
+      expect(succeeded!.traces).toHaveLength(1);
+    });
+
+    it("never asks about a job", async () => {
+      const rule = vi.fn(() => true);
+      registry.configureSkipSpans(rule);
+      registry.startTrace("s6", {
+        id: "job-1",
+        traceId: "s6",
+        name: "send-mail",
+        queueName: "mail",
+      } as never);
+      failWith("s6", new NotFoundException());
+      registry.endTrace("s6", { status: "failed" });
+
+      const snapshot = await registry.pluckSnapshot("s6");
+
+      expect(rule).not.toHaveBeenCalled();
+      expect(snapshot!.traces).toHaveLength(1);
+    });
+
+    it("keeps the spans when the function throws, and says so once", async () => {
+      const warn = vi
+        .spyOn((registry as unknown as { logger: Logger }).logger, "warn")
+        .mockImplementation(() => undefined);
+      registry.configureSkipSpans(() => {
+        throw new Error("bad rule");
+      });
+
+      for (const traceId of ["s7", "s8"]) {
+        startRequest(traceId);
+        failWith(traceId, new NotFoundException());
+        registry.endTrace(traceId, { statusCode: 404 });
+        const snapshot = await registry.pluckSnapshot(traceId);
+        expect(snapshot!.traces).toHaveLength(1);
+      }
+      // Once, not per request: a rule that throws throws on every request.
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("bad rule"));
     });
   });
 
