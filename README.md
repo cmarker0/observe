@@ -274,6 +274,37 @@ ObserveModule.forRoot({
 
 A failed request is always captured (headers only, unless `body` is on); `capture: false` turns the feature off. Everything captured goes through the same redaction as error messages and logs before it leaves the process - sensitive keys by name, secrets by pattern - so naming `authorization` in `headers` records `[REDACTED]`.
 
+## Declaring objectives in code
+
+`@Objective()` states what a route promises, next to the handler that has to keep it, and Observe turns each promise into an [SLO](https://www.observe.nestjs.com/documentation/slos). The objective is written, reviewed and versioned with the route it covers:
+
+```ts
+import { Objective } from "@nestjs/observe";
+
+@Controller("orders")
+export class OrdersController {
+  @Post()
+  @Objective({ availability: 99.9, latency: { underMs: 300, target: 99 } })
+  create(@Body() dto: CreateOrderDto) {
+    return this.ordersService.create(dto);
+  }
+}
+```
+
+- `availability` - the percentage of requests that don't fail with an unhandled error: `99.9` for three nines.
+- `latency` - `{ underMs, target }`: `target` percent of requests finish in under `underMs` milliseconds.
+- `windowDays` - the rolling window it is judged over: 7, 14, 28 (the default) or 30 days.
+- `name` - what the dashboard calls it, instead of the route and the promise.
+
+Each promise becomes its own SLO, scoped to the application and the route: `POST /orders availability` and `POST /orders under 300ms` above. The route is read from the first request the handler serves, so a global prefix, URI versioning and `RouterModule` paths come out right, and the SLO appears once the route has had traffic. From then on:
+
+- **The code owns it.** Change a target, a window or a name and deploy, and the same SLO follows. The dashboard marks it **in code**, names the handler and the release that last declared it, and doesn't edit it. A new latency threshold is a new promise, so it becomes a new SLO.
+- **A delete in the dashboard doesn't last** while the decorator is there: the agent restates each route's objectives hourly, and a missing SLO is made again. To retire one, remove the decorator, then delete the SLO.
+
+Declarations are checked when the application starts, and whatever fails is logged rather than sent. Targets run from 90 to 99.999, `underMs` is whole milliseconds up to 600000, and a handler carries at most ten objectives; a field other than these four is left out. A handler mounted on several routes - `@Get(["catalog", "products"])`, or a controller answering two versions - isn't declared at all, because an SLO watches one route: give each route a handler of its own.
+
+SLOs need a plan that has them - Scale or Enterprise. On any other plan, declarations are sent and ignored. The [documentation](https://www.observe.nestjs.com/documentation/sdk#declaring-objectives-in-code) has the rest.
+
 ## Optional peer dependencies
 
 Protocol integrations are only loaded when you use them, and their packages are optional peers:
