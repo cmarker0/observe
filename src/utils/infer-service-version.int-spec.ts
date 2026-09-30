@@ -202,6 +202,26 @@ describe("Release inference: the release a batch carries", () => {
     expect(batch.serviceVersion).toBe("4.2.0");
   });
 
+  it("cuts a release the application names to the 50 characters the collector accepts, and says so", async () => {
+    // Sent whole, it would cost every batch: the collector refuses a batch
+    // whose version is too long rather than cutting it.
+    const warn = vi
+      .spyOn(Logger.prototype, "warn")
+      .mockImplementation(() => undefined);
+    const named =
+      "123456789012.dkr.ecr.eu-west-1.amazonaws.com/orders-api:2026.09.30-1";
+
+    const batch = await firstBatch((ObserveModule) =>
+      ObserveModule.forRoot(options({ serviceVersion: named })),
+    );
+
+    expect(batch.serviceVersion).toHaveLength(50);
+    expect(batch.serviceVersion?.startsWith(named.slice(0, 41))).toBe(true);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(`is sent as "${batch.serviceVersion}"`),
+    );
+  });
+
   it("sends OBSERVE_SERVICE_VERSION when the application names none, ahead of a platform's commit", async () => {
     vi.stubEnv("OBSERVE_SERVICE_VERSION", "2026.09.29-rc.1");
     vi.stubEnv("VERCEL_GIT_COMMIT_SHA", PLATFORM_SHA);

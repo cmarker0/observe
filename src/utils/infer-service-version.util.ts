@@ -1,5 +1,9 @@
 import { readFileSync, statSync } from "fs";
 import { dirname, join, resolve } from "path";
+import {
+  fitServiceVersion,
+  MAX_SERVICE_VERSION_LENGTH,
+} from "./fit-service-version.util.js";
 
 /** A release found without the application naming one. */
 export interface InferredServiceVersion {
@@ -57,15 +61,6 @@ const REVISION_ENV_VARS = [
   "CONTAINER_APP_REVISION", // Azure Container Apps
 ];
 
-/**
- * The longest version the collector accepts. A longer one is not truncated
- * there - the whole batch it rides in is refused - so an inferred version is
- * cut to fit before it is ever sent: from the end for a commit, whose head is
- * what identifies it, and from the start for a revision, whose head is the
- * service's name that every revision shares.
- */
-const MAX_VERSION_LENGTH = 50;
-
 /** A full commit id: SHA-1, or SHA-256 in a repository created with it. */
 const COMMIT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
@@ -84,7 +79,7 @@ export function inferServiceVersion(
   for (const name of VERSION_ENV_VARS) {
     const value = env[name]?.trim();
     if (value) {
-      return { version: value.slice(0, MAX_VERSION_LENGTH), source: name };
+      return { version: fitServiceVersion(value), source: name };
     }
   }
 
@@ -98,7 +93,12 @@ export function inferServiceVersion(
   for (const name of REVISION_ENV_VARS) {
     const value = env[name]?.trim();
     if (value) {
-      return { version: value.slice(-MAX_VERSION_LENGTH), source: name };
+      // Cut from the start: a revision's head is the service's name, which
+      // every revision shares, and its end is the part each deploy changes.
+      return {
+        version: value.slice(-MAX_SERVICE_VERSION_LENGTH),
+        source: name,
+      };
     }
   }
 
@@ -130,7 +130,7 @@ function readCheckoutHead(start: string): InferredServiceVersion | undefined {
     if (gitDir) {
       const commit = readHeadCommit(gitDir);
       return commit
-        ? { version: commit.slice(0, MAX_VERSION_LENGTH), source: gitDir }
+        ? { version: fitServiceVersion(commit), source: gitDir }
         : undefined;
     }
     const parent = dirname(directory);

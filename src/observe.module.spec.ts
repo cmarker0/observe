@@ -1,4 +1,4 @@
-import type { FactoryProvider } from "@nestjs/common";
+import { Logger, type FactoryProvider } from "@nestjs/common";
 import type {
   ObserveOptions,
   ObserveOptionsFactory,
@@ -430,6 +430,11 @@ describe("createObserveModule#redaction wiring", () => {
 describe("createObserveModule#serviceVersion", () => {
   const { ObserveModule } = createObserveModule();
   const credentials = { appKey: "key", appSecret: "secret", serviceId: "svc" };
+  /** A release named after the image it deploys: 68 characters. */
+  const NAMED =
+    "123456789012.dkr.ecr.eu-west-1.amazonaws.com/orders-api:2026.09.30-1";
+  /** What it is sent as: its head, and a hash of the whole. */
+  const SENT = "123456789012.dkr.ecr.eu-west-1.amazonaws.~d8c2b916";
 
   const forRootOptions = (options: ObserveOptions) =>
     (
@@ -444,6 +449,7 @@ describe("createObserveModule#serviceVersion", () => {
 
   afterEach(() => {
     vi.unstubAllEnvs();
+    vi.restoreAllMocks();
   });
 
   it("infers the release when forRoot names none", () => {
@@ -457,16 +463,43 @@ describe("createObserveModule#serviceVersion", () => {
   });
 
   it("keeps a release the application named", () => {
+    const warn = vi.spyOn(Logger.prototype, "warn");
+
     expect(
       forRootOptions({ ...credentials, serviceVersion: "1.2.3" })
         .serviceVersion,
     ).toBe("1.2.3");
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("cuts a named release to what the collector accepts, and says what is sent", () => {
+    const warn = vi
+      .spyOn(Logger.prototype, "warn")
+      .mockImplementation(() => undefined);
+
+    expect(
+      forRootOptions({ ...credentials, serviceVersion: NAMED }).serviceVersion,
+    ).toBe(SENT);
+    expect(warn).toHaveBeenCalledWith(
+      `serviceVersion "${NAMED}" is sent as "${SENT}": the collector takes at most 50 characters.`,
+    );
   });
 
   it("reports none when told not to", () => {
     expect(
       forRootOptions({ ...credentials, serviceVersion: false }).serviceVersion,
     ).toBe(false);
+  });
+
+  it("cuts a named release on the async path as well", async () => {
+    vi.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
+    const [provider] = ObserveModule.createAsyncProviders({
+      useFactory: () => ({ ...credentials, serviceVersion: NAMED }),
+    });
+
+    await expect(
+      (provider as FactoryProvider).useFactory(),
+    ).resolves.toMatchObject({ serviceVersion: SENT });
   });
 
   it("infers the release on the async path as well", async () => {

@@ -45,6 +45,10 @@ import { TracerService } from "./services/tracer.service.js";
 import { KeyOf } from "./types/key-of.type.js";
 import { assertModuleOptions } from "./utils/assert-module-options.util.js";
 import { defaultTraceIdGenerator } from "./utils/default-trace-id-generator.util.js";
+import {
+  fitServiceVersion,
+  MAX_SERVICE_VERSION_LENGTH,
+} from "./utils/fit-service-version.util.js";
 import { inferServiceVersion } from "./utils/infer-service-version.util.js";
 import { LogRedactor } from "./utils/log-redactor.js";
 
@@ -61,11 +65,22 @@ const MISSING_ASYNC_OPTIONS_PROVIDER =
  * and fix verification work without anyone threading a version through the
  * build. Resolved once, with the rest of the options: the answer cannot change
  * while the process runs. `serviceVersion: false` opts out.
+ *
+ * A release the application names is cut to what the collector accepts, as
+ * an inferred one is - sent whole, it would cost every batch it rides in.
  */
 function withServiceVersion<
   Options extends Pick<ObserveOptions, "serviceVersion" | "debug">,
 >(options: Options): Options {
-  if (options.serviceVersion || options.serviceVersion === false) {
+  const named = options.serviceVersion;
+  if (typeof named === "string" && named.length > MAX_SERVICE_VERSION_LENGTH) {
+    const sent = fitServiceVersion(named);
+    new Logger("ObserveModule").warn(
+      `serviceVersion "${named}" is sent as "${sent}": the collector takes at most ${MAX_SERVICE_VERSION_LENGTH} characters.`,
+    );
+    return { ...options, serviceVersion: sent };
+  }
+  if (named || named === false) {
     return options;
   }
   const inferred = inferServiceVersion();

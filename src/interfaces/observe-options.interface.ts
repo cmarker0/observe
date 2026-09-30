@@ -200,6 +200,11 @@ export interface ObserveOptions {
    * (`VERCEL_GIT_COMMIT_SHA`, `RENDER_GIT_COMMIT`, `GITHUB_SHA`, ...), else the
    * commit checked out where the process runs, else a container platform's
    * revision name. `false` reports no release at all.
+   *
+   * At most 50 characters, the longest the collector accepts. A longer one is
+   * cut to fit, with a warning when the application starts: a commit keeps its
+   * first 50, anything else its first 41 and a hash of the whole, so two
+   * releases that differ only past the cut stay apart.
    */
   serviceVersion?: string | false;
 

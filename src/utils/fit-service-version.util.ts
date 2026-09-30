@@ -1,0 +1,36 @@
+import { createHash } from "crypto";
+
+/**
+ * The longest version the collector accepts. A longer one is not truncated
+ * there - the whole batch it rides in is refused - so a version is cut to fit
+ * before it is ever sent.
+ */
+export const MAX_SERVICE_VERSION_LENGTH = 50;
+
+/** How much of a cut version is a hash of the whole. */
+const HASH_LENGTH = 8;
+
+const HEX = /^[0-9a-f]+$/i;
+
+/**
+ * `version`, at most as long as the collector accepts.
+ *
+ * A commit keeps its head, which is what identifies it - and what git and the
+ * dashboard shorten it to. Anything else keeps its head too, but ends in a
+ * hash of the whole after a `~`: the part each deploy changes can sit past the
+ * cut - the tag at the end of an image reference, say - and cut there, every
+ * release would arrive as the same one.
+ */
+export function fitServiceVersion(version: string): string {
+  if (version.length <= MAX_SERVICE_VERSION_LENGTH) {
+    return version;
+  }
+  if (HEX.test(version)) {
+    return version.slice(0, MAX_SERVICE_VERSION_LENGTH);
+  }
+  const hash = createHash("sha256")
+    .update(version)
+    .digest("hex")
+    .slice(0, HASH_LENGTH);
+  return `${version.slice(0, MAX_SERVICE_VERSION_LENGTH - HASH_LENGTH - 1)}~${hash}`;
+}

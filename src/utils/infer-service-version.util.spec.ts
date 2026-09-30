@@ -68,6 +68,15 @@ describe("inferServiceVersion", () => {
       ).toEqual({ version: SHA_A, source: "GIT_SHA" });
     });
 
+    it("keeps apart long releases that differ only past the collector's limit", () => {
+      const image = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/orders-api";
+      const release = (tag: string) =>
+        infer({ OBSERVE_SERVICE_VERSION: `${image}:${tag}` })?.version;
+
+      expect(release("2026.09.30-1")).toHaveLength(50);
+      expect(release("2026.09.30-1")).not.toBe(release("2026.09.30-2"));
+    });
+
     it("wins over the checkout", () => {
       write(".git/HEAD", `${SHA_A}\n`);
       expect(infer({ GITHUB_SHA: SHA_B })?.version).toBe(SHA_B);
@@ -190,7 +199,7 @@ describe("inferServiceVersion", () => {
     const sha256 = "d".repeat(64);
     write(".git/HEAD", `${sha256}\n`);
     expect(infer()?.version).toBe("d".repeat(50));
-    expect(infer({ GIT_SHA: "x".repeat(80) })?.version).toBe("x".repeat(50));
+    expect(infer({ GIT_SHA: "x".repeat(80) })?.version).toHaveLength(50);
   });
 
   it("finds nothing when nothing names a release", () => {
