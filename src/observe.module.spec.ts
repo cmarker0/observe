@@ -420,3 +420,77 @@ describe("createObserveModule#redaction wiring", () => {
     expect(redactorOf(registry)).toBeNull();
   });
 });
+
+/**
+ * The release is filled in with the rest of the options, so every consumer of
+ * `OBSERVE_OPTIONS` sees the same answer. `OBSERVE_SERVICE_VERSION` is the
+ * first place inference looks, which keeps these independent of whatever
+ * commit the suite itself happens to run in.
+ */
+describe("createObserveModule#serviceVersion", () => {
+  const { ObserveModule } = createObserveModule();
+  const credentials = { appKey: "key", appSecret: "secret", serviceId: "svc" };
+
+  const forRootOptions = (options: ObserveOptions) =>
+    (
+      ObserveModule.forRoot(options).providers![0] as {
+        useValue: ObserveOptions;
+      }
+    ).useValue;
+
+  beforeEach(() => {
+    vi.stubEnv("OBSERVE_SERVICE_VERSION", "inferred-release");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("infers the release when forRoot names none", () => {
+    expect(forRootOptions(credentials).serviceVersion).toBe("inferred-release");
+  });
+
+  it("infers it for an empty string too", () => {
+    expect(
+      forRootOptions({ ...credentials, serviceVersion: "" }).serviceVersion,
+    ).toBe("inferred-release");
+  });
+
+  it("keeps a release the application named", () => {
+    expect(
+      forRootOptions({ ...credentials, serviceVersion: "1.2.3" })
+        .serviceVersion,
+    ).toBe("1.2.3");
+  });
+
+  it("reports none when told not to", () => {
+    expect(
+      forRootOptions({ ...credentials, serviceVersion: false }).serviceVersion,
+    ).toBe(false);
+  });
+
+  it("infers the release on the async path as well", async () => {
+    const [provider] = ObserveModule.createAsyncProviders({
+      useFactory: () => credentials,
+    });
+
+    await expect(
+      (provider as FactoryProvider).useFactory(),
+    ).resolves.toMatchObject({ serviceVersion: "inferred-release" });
+  });
+
+  it("infers the release through an options factory class", async () => {
+    class OptionsFactory implements ObserveOptionsFactory {
+      createObserveOptions() {
+        return credentials;
+      }
+    }
+    const [provider] = ObserveModule.createAsyncProviders({
+      useClass: OptionsFactory,
+    });
+
+    await expect(
+      (provider as FactoryProvider).useFactory(new OptionsFactory()),
+    ).resolves.toMatchObject({ serviceVersion: "inferred-release" });
+  });
+});

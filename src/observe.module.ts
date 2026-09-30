@@ -44,6 +44,7 @@ import { TracerService } from "./services/tracer.service.js";
 import { KeyOf } from "./types/key-of.type.js";
 import { assertModuleOptions } from "./utils/assert-module-options.util.js";
 import { defaultTraceIdGenerator } from "./utils/default-trace-id-generator.util.js";
+import { inferServiceVersion } from "./utils/infer-service-version.util.js";
 import { LogRedactor } from "./utils/log-redactor.js";
 
 /**
@@ -53,6 +54,29 @@ import { LogRedactor } from "./utils/log-redactor.js";
  */
 const MISSING_ASYNC_OPTIONS_PROVIDER =
   'ObserveModule.forRootAsync() requires one of "useFactory", "useClass" or "useExisting".';
+
+/**
+ * Names the release when the application did not, so Releases, regressions
+ * and fix verification work without anyone threading a version through the
+ * build. Resolved once, with the rest of the options: the answer cannot change
+ * while the process runs. `serviceVersion: false` opts out.
+ */
+function withServiceVersion<
+  Options extends Pick<ObserveOptions, "serviceVersion" | "debug">,
+>(options: Options): Options {
+  if (options.serviceVersion || options.serviceVersion === false) {
+    return options;
+  }
+  const inferred = inferServiceVersion();
+  if (options.debug) {
+    new Logger("ObserveModule").debug(
+      inferred
+        ? `serviceVersion "${inferred.version}" inferred from ${inferred.source}.`
+        : "serviceVersion is not set and none could be inferred, so telemetry will carry no release.",
+    );
+  }
+  return inferred ? { ...options, serviceVersion: inferred.version } : options;
+}
 
 export function createObserveModule<Store extends Record<string, unknown>>(
   options: CreateObserveModuleOptions = {},
@@ -154,10 +178,10 @@ export function createObserveModule<Store extends Record<string, unknown>>(
         providers: [
           {
             provide: OBSERVE_OPTIONS,
-            useValue: {
+            useValue: withServiceVersion({
               ...options,
               ...observeOpts,
-            },
+            }),
           },
         ],
       };
@@ -203,10 +227,10 @@ export function createObserveModule<Store extends Record<string, unknown>>(
           provide: OBSERVE_OPTIONS,
           useFactory: async (...args: any[]) => {
             const opts = await useFactory(...args);
-            return {
+            return withServiceVersion({
               ...options,
               ...opts,
-            };
+            });
           },
           inject: asyncOptions.inject || [],
         };
@@ -218,10 +242,11 @@ export function createObserveModule<Store extends Record<string, unknown>>(
       }
       return {
         provide: OBSERVE_OPTIONS,
-        useFactory: async (optionsFactory: ObserveOptionsFactory) => ({
-          ...options,
-          ...(await optionsFactory.createObserveOptions()),
-        }),
+        useFactory: async (optionsFactory: ObserveOptionsFactory) =>
+          withServiceVersion({
+            ...options,
+            ...(await optionsFactory.createObserveOptions()),
+          }),
         inject: [optionsFactoryToken],
       };
     }

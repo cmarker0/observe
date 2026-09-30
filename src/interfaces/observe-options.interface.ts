@@ -191,13 +191,17 @@ export interface ObserveOptions {
   serviceId: string;
 
   /**
-   * Version of the service.
-   * This can be used to track changes in the service over time.
-   * It is optional and can be used to differentiate between different versions of the service.
-   * For example, it could be a semantic version like "1.0.0"
-   * or a commit hash like "abc123".
+   * The release this process is running - what Releases, regressions and fix
+   * verification attribute a change to. A semantic version, a commit hash,
+   * anything that changes with each deploy.
+   *
+   * Leave it unset and the SDK infers one: `OBSERVE_SERVICE_VERSION` if the
+   * environment sets it, else the commit a hosting platform or CI job exposes
+   * (`VERCEL_GIT_COMMIT_SHA`, `RENDER_GIT_COMMIT`, `GITHUB_SHA`, ...), else the
+   * commit checked out where the process runs, else a container platform's
+   * revision name. `false` reports no release at all.
    */
-  serviceVersion?: string;
+  serviceVersion?: string | false;
 
   /**
    * Interval in milliseconds at which the tracer submits traces to the Agent.
