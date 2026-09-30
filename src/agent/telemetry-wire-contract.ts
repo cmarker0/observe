@@ -180,6 +180,33 @@ const LOG_ENTRY: Shape = {
   attributes: { type: "object" },
 };
 
+/** One `@Objective(...)` as a handler declares it. */
+const DECLARED_OBJECTIVE: Shape = {
+  availability: { type: "number" },
+  latency: {
+    type: "object",
+    shape: {
+      underMs: { type: "number", required: true },
+      target: { type: "number", required: true },
+    },
+  },
+  windowDays: { type: "number" },
+  name: { type: "string" },
+};
+
+/** A handler's objectives, with the route it was seen to serve. */
+const OBJECTIVE_DECLARATION: Shape = {
+  handler: { type: "string", required: true },
+  operationId: { type: "string", required: true },
+  method: { type: "string" },
+  objectives: {
+    type: "object",
+    array: true,
+    required: true,
+    shape: DECLARED_OBJECTIVE,
+  },
+};
+
 /** The batch body the agent POSTs to the collector. */
 export const TELEMETRY_BATCH: Shape = {
   serviceId: { type: "string", required: true },
@@ -190,6 +217,7 @@ export const TELEMETRY_BATCH: Shape = {
   runtime: { type: "object", shape: RUNTIME_METRICS },
   custom: { type: "object", array: true, shape: CUSTOM_METRIC },
   logs: { type: "object", array: true, shape: LOG_ENTRY },
+  objectives: { type: "object", array: true, shape: OBJECTIVE_DECLARATION },
 };
 
 /**

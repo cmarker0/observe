@@ -3,8 +3,12 @@ import {
   DEGRADED_TTL_MS,
   isNotableSnapshot,
 } from "./degraded-ingest.protocol.js";
-import { Inject, Injectable, Logger } from "@nestjs/common";
+import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
 import { Counter, Gauge, Summary } from "../custom-metrics/index.js";
+import {
+  ObjectiveDeclaration,
+  ObjectivesRegistry,
+} from "../objectives/objectives.registry.js";
 import {
   CustomMetricsEncoder,
   EncodedCustomMetric,
@@ -111,6 +115,9 @@ interface BufferedLogEntry {
   text: string;
 }
 
+/** Declarations one batch carries at most - the collector's own limit. */
+const MAX_OBJECTIVES_PER_BATCH = 100;
+
 /**
  * Payload structure for the agent metrics.
  * This payload is used to send metrics from the main thread to the worker thread.
@@ -122,13 +129,15 @@ interface AgentMetricsPayload {
    */
   serviceId: string;
   /**
-   * Version of the service.
-   * This can be used to track changes in the service over time.
-   * It is optional and can be used to differentiate between different versions of the service.
-   * For example, it could be a semantic version like "1.0.0"
-   * or a commit hash like "abc123".
+   * The release the process is running, as configured or inferred (see
+   * `ObserveOptions.serviceVersion`). Absent when there is neither.
    */
   serviceVersion?: string;
+  /**
+   * Objectives declared with `@Objective`, each paired with the route its
+   * handler was seen to serve (see ObjectivesRegistry).
+   */
+  objectives?: ObjectiveDeclaration[];
   /**
    * Spans built and then withheld because the collector reported this
    * account's ingestion is reduced.
@@ -207,6 +216,10 @@ export class ObserveAgentSharedBuffer {
   constructor(
     @Inject(OBSERVE_OPTIONS)
     private readonly options: ObserveModuleOptionsWithDefaults,
+    // Optional so the buffer can be built on its own, as most of its suites
+    // build it; the module always provides it.
+    @Optional()
+    private readonly objectivesRegistry?: ObjectivesRegistry,
   ) {}
 
   insertRequestSnapshot(snapshot: RequestSnapshot) {
@@ -253,6 +266,22 @@ export class ObserveAgentSharedBuffer {
       delete encodedSnapshot.t;
     }
     this._mainThreadBuffer.snapshots.push(encodedSnapshot);
+
+    // Read off the raw snapshot: the handler's span carries `Class.method`,
+    // which is what `@Objective` declarations are keyed by. Declarations are
+    // not telemetry, so they ride even a degraded batch - but a batch holds
+    // only as many as the collector accepts, and one that did not fit is left
+    // for a later request to bring due.
+    const objectives = (this._mainThreadBuffer.objectives ??= []);
+    if (objectives.length < MAX_OBJECTIVES_PER_BATCH) {
+      const declaration = this.objectivesRegistry?.declarationFor(snapshot);
+      if (declaration) {
+        objectives.push(declaration);
+      }
+    }
+    if (objectives.length === 0) {
+      delete this._mainThreadBuffer.objectives;
+    }
   }
 
   insertJobSnapshot(jobSnapshot: JobSnapshot) {

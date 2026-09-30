@@ -2,6 +2,7 @@ export * from "./custom-metrics/index.js";
 export * from "./instrument/create-instance-decorator.instrument.js";
 export * from "./interfaces/index.js";
 export * from "./observe.constants.js";
+export * from "./objectives/index.js";
 export * from "./observe.module.js";
 export * from "./services/index.js";
 export * from "./trace-span.delegate.js";

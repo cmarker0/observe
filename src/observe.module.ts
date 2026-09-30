@@ -16,6 +16,7 @@ import {
 import { AsyncLocalStorage } from "async_hooks";
 import { ObserveAgentSharedBuffer } from "./agent/observe-agent.shared-buffer.js";
 import { ObserveAgentWorker } from "./agent/observe-agent.worker.js";
+import { ObjectivesRegistry } from "./objectives/objectives.registry.js";
 import { createInstanceDecorator } from "./instrument/create-instance-decorator.instrument.js";
 import {
   CreateObserveModuleOptions,
@@ -144,6 +145,9 @@ export function createObserveModule<Store extends Record<string, unknown>>(
       GraphQLObserveAgentService,
       ObserveAgentWorker,
       ObserveAgentSharedBuffer,
+      // Reads `@Objective` off the controllers at boot, for the buffer to
+      // pair with the routes their handlers serve.
+      ObjectivesRegistry,
       TraceSamplerService,
       NodeRuntimeMetricsService,
       // Registered unconditionally; the service itself is a no-op unless
@@ -265,6 +269,9 @@ export function createObserveModule<Store extends Record<string, unknown>>(
         instance instanceof TraceSamplerService ||
         instance instanceof TracerService ||
         instance instanceof ObserveAgentSharedBuffer ||
+        // Consulted as each request's snapshot is buffered: agent bookkeeping,
+        // not application code.
+        instance instanceof ObjectivesRegistry ||
         // Its methods run *inside* the traces it opens, so instrumenting it
         // would put a span for the agent itself at the root of every GraphQL
         // operation it records.
