@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "async_hooks";
+import { EventEmitter } from "events";
 import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
 import { createInstanceDecorator } from "./create-instance-decorator.instrument.js";
 
@@ -359,6 +360,65 @@ describe("createInstanceDecorator", () => {
           { className: "AsyncService", methodName: "load" },
         ]);
       });
+    });
+  });
+
+  describe("when a field holds a constructor", () => {
+    it("hands out a native constructor untouched, statics intact", () => {
+      // pg-pool keeps `this.Promise = options.Promise || global.Promise` and
+      // calls `new this.Promise(...)` and `this.Promise.reject(...)` - both
+      // broke once the field came back as a traced wrapper.
+      const raw = { Promise };
+      const wrapped = decorate(raw) as typeof raw;
+
+      expect(withTrace(() => wrapped.Promise)).toBe(Promise);
+      expect(
+        withTrace(() => new wrapped.Promise((resolve) => resolve(1))),
+      ).toBeInstanceOf(Promise);
+      expect(startedSteps).toEqual([]);
+    });
+
+    it("hands out an ES5-style constructor untouched", () => {
+      function Legacy(this: { value: number }) {
+        this.value = 1;
+      }
+      Legacy.prototype.read = function () {
+        return this.value;
+      };
+      const raw = { Legacy };
+      const wrapped = decorate(raw) as typeof raw;
+
+      expect(withTrace(() => wrapped.Legacy)).toBe(Legacy);
+    });
+
+    it("runs a real pg.Pool query registered as a provider", async () => {
+      const { default: pg } = await import("pg");
+      // Stands in for a connection so the pool can check one out offline.
+      class StubClient extends EventEmitter {
+        connect(cb: (err?: Error) => void) {
+          cb();
+        }
+        query(...args: unknown[]) {
+          const cb = args.at(-1) as (err: Error | null, res: unknown) => void;
+          cb(null, { rows: [{ ok: 1 }] });
+        }
+        end(cb?: () => void) {
+          cb?.();
+        }
+      }
+      const pool = decorate(
+        new pg.Pool({ Client: StubClient } as never),
+      ) as InstanceType<typeof pg.Pool>;
+
+      const result = await withTrace(() => pool.query("SELECT 1"));
+
+      expect(result.rows).toEqual([{ ok: 1 }]);
+      // The pool's own `this.connect()` & co. follow as nested steps.
+      expect(startedSteps[0]).toEqual({
+        className: "BoundPool",
+        methodName: "query",
+      });
+      await pool.end();
     });
   });
 

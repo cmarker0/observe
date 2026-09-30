@@ -162,7 +162,7 @@ export function createInstanceDecorator<T extends Record<string, unknown>>(
   const instrumentFunction = (fn: AnyFunction) => {
     // Classes are functions too, but calling one is a construction, not the
     // kind of call this decorator traces.
-    if (isClass(fn) || options.skipInstrumentation(fn)) {
+    if (isConstructor(fn) || options.skipInstrumentation(fn)) {
       return fn;
     }
 
@@ -252,7 +252,10 @@ export function createInstanceDecorator<T extends Record<string, unknown>>(
 
         const shouldProxy =
           isFunction &&
-          !isClass(attributeValue) &&
+          // A constructor held in a field - pg-pool's `this.Promise` - is
+          // invoked with `new` and read for statics (`this.Promise.reject`);
+          // the traced wrapper supports neither.
+          !isConstructor(attributeValue) &&
           // A callable *object* - a Mongoose model, an Axios instance, an
           // EventEmitter-backed client - is a field, not a method. The traced
           // wrapper is a fresh bound function, so wrapping one silently drops
@@ -402,8 +405,23 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function isClass(value: AnyFunction): boolean {
-  return /^\s*class\s+/.test(value.toString());
+/**
+ * Whether a function is meant to be invoked with `new`: a `class`, or a
+ * constructor that predates the syntax - a built-in like `Promise`, or an
+ * ES5-style (or down-compiled) class - told apart by a `prototype` carrying
+ * members of its own. Methods have no `prototype` at all, and a plain
+ * `function` gets one holding only `constructor`.
+ */
+function isConstructor(value: AnyFunction): boolean {
+  if (/^\s*class\s+/.test(Function.prototype.toString.call(value))) {
+    return true;
+  }
+  const prototype: unknown = value.prototype;
+  return (
+    typeof prototype === "object" &&
+    prototype !== null &&
+    Reflect.ownKeys(prototype).some((key) => key !== "constructor")
+  );
 }
 
 /**
