@@ -370,6 +370,50 @@ describe("RequestSnapshotEncoder", () => {
     ).not.toHaveProperty("st");
   });
 
+  it("cuts span text longer than the collector accepts, at any depth", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const long = (head: string) => `${head}${"x".repeat(300)}`;
+    const withLongText = {
+      ...(snapshot as Record<string, any>),
+      traces: [
+        {
+          origin: "manual",
+          name: long("checkout:"),
+          className: long("Checkout"),
+          methodKey: long("submit"),
+          duration: 2,
+          spanId: "s1",
+          children: [
+            {
+              origin: "auto",
+              className: long("Payments"),
+              methodKey: "charge",
+              duration: 1,
+              spanId: "s2",
+            },
+          ],
+        },
+      ],
+    } as never;
+
+    try {
+      const [span] = (
+        RequestSnapshotEncoder.encode(withLongText) as Record<string, any>
+      ).t;
+
+      // One of these over 255 characters and the collector refuses the whole
+      // batch; cut the same way every time, the span still aggregates.
+      expect(span.n).toBe(fitToLength(long("checkout:"), 255));
+      expect(span.c).toBe(fitToLength(long("Checkout"), 255));
+      expect(span.m).toBe(fitToLength(long("submit"), 255));
+      expect(span.ch[0].c).toBe(fitToLength(long("Payments"), 255));
+      expect(span.ch[0].m).toBe("charge");
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("omits the children key on a leaf span", () => {
     const leafOnly = {
       ...(snapshot as Record<string, any>),

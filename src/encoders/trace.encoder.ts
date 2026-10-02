@@ -1,5 +1,33 @@
 import { CompleteTraceEventNode } from "../interfaces/trace-events.interfaces.js";
+import { fitToLength } from "../utils/fit-to-length.util.js";
 import { remapKeys } from "./remap-keys.util.js";
+
+/**
+ * The longest span name, class name and method name the collector accepts. It
+ * refuses the whole batch over a longer one rather than cutting it, so each is
+ * cut to fit here - the same way every time, so a span's numbers still add up
+ * under one name.
+ */
+const MAX_SPAN_TEXT_LENGTH = 255;
+
+/** Whether a cut has been reported: once for the process, not per span. */
+let reportedCut = false;
+
+function fitSpanText(value: string): string {
+  if (value.length <= MAX_SPAN_TEXT_LENGTH) {
+    return value;
+  }
+  const sent = fitToLength(value, MAX_SPAN_TEXT_LENGTH);
+  if (!reportedCut) {
+    reportedCut = true;
+    console.warn(
+      `[observe] A span name, class name or method name of ${value.length} characters is sent as "${sent}": ` +
+        `the collector takes at most ${MAX_SPAN_TEXT_LENGTH} and refuses the whole batch over a longer one. ` +
+        `Others are cut the same way, without another warning.`,
+    );
+  }
+  return sent;
+}
 
 export const TRACE_KEY_MAP = {
   name: "n",
@@ -42,6 +70,17 @@ export function encodeTrace(
     trace,
     TRACE_KEY_MAP,
   );
+  // Assigned only where present: a key added as `undefined` would change
+  // which keys a span carries.
+  if (typeof encoded.n === "string") {
+    encoded.n = fitSpanText(encoded.n);
+  }
+  if (typeof encoded.c === "string") {
+    encoded.c = fitSpanText(encoded.c);
+  }
+  if (typeof encoded.m === "string") {
+    encoded.m = fitSpanText(encoded.m);
+  }
   // Outside the key remapping above, deliberately. Done inside that loop, every
   // own key of a node re-encoded that node's whole subtree, so the work was
   // keys^depth rather than one visit per node - a trace a few levels deeper
