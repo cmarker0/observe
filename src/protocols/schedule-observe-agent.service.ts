@@ -100,14 +100,19 @@ export class ScheduleObserveAgentService<
    * guarantee of landing before the explorer's `onModuleInit` has already
    * wrapped every handler.
    */
-  private loadScheduleExplorer(): ScheduleExplorerLike | undefined {
+  private loadScheduleExplorer(
+    // A parameter only so the specs can stand in for the package: the version
+    // installed here exports the explorer, which would otherwise leave the
+    // deep-path fallback below running in no test at all.
+    load: typeof loadOptionalPeer = loadOptionalPeer,
+  ): ScheduleExplorerLike | undefined {
     type ExplorerModule = { ScheduleExplorer?: ScheduleExplorerLike };
 
     // The entry point is the supported source, but it only re-exports the
     // explorer from 12.0.1 onwards; every earlier version keeps it behind a
     // deep path. Try the public export first, then the file, so a supported
     // import is preferred wherever one exists.
-    const entryPoint = loadOptionalPeer<ExplorerModule>("@nestjs/schedule");
+    const entryPoint = load<ExplorerModule>("@nestjs/schedule");
     if (!entryPoint.installed) {
       // Nothing scheduled, nothing to patch, and that is not a
       // misconfiguration.
@@ -117,7 +122,7 @@ export class ScheduleObserveAgentService<
       return entryPoint.module.ScheduleExplorer;
     }
 
-    const deepPath = loadOptionalPeer<ExplorerModule>(
+    const deepPath = load<ExplorerModule>(
       "@nestjs/schedule",
       "@nestjs/schedule/dist/schedule.explorer.js",
     );
