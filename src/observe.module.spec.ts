@@ -8,6 +8,7 @@ import { createObserveModule } from "./observe.module.js";
 import { OBSERVE_OPTIONS } from "./observe.constants.js";
 import { DEFAULT_SPAN_COLLAPSE } from "./services/collapse-repeated-spans.util.js";
 import { OperationTraceRegistry } from "./services/operation-trace.registry.js";
+import { fitToLength } from "./utils/fit-to-length.util.js";
 import { LogRedactor } from "./utils/log-redactor.js";
 
 /**
@@ -525,5 +526,78 @@ describe("createObserveModule#serviceVersion", () => {
     await expect(
       (provider as FactoryProvider).useFactory(new OptionsFactory()),
     ).resolves.toMatchObject({ serviceVersion: "inferred-release" });
+  });
+});
+
+/**
+ * `serviceId` rides on every batch, and the collector refuses one whose id is
+ * longer than it accepts - so a longer one would cost all of them.
+ */
+describe("createObserveModule#serviceId", () => {
+  const { ObserveModule } = createObserveModule();
+  const credentials = {
+    appKey: "key",
+    appSecret: "secret",
+    serviceVersion: "1.2.3",
+  };
+  /** A service named after where it runs: 113 characters. */
+  const NAMED = `orders-api.${"eu-west-1.".repeat(10)}prod`;
+  /** What it is sent as: its head, and a hash of the whole. */
+  const SENT = fitToLength(NAMED, 100);
+
+  const forRootOptions = (options: ObserveOptions) =>
+    (
+      ObserveModule.forRoot(options).providers![0] as {
+        useValue: ObserveOptions;
+      }
+    ).useValue;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("keeps one that fits", () => {
+    const warn = vi.spyOn(Logger.prototype, "warn");
+
+    expect(forRootOptions({ ...credentials, serviceId: "svc" }).serviceId).toBe(
+      "svc",
+    );
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("cuts a longer one to what the collector accepts, and says what is sent", () => {
+    const warn = vi
+      .spyOn(Logger.prototype, "warn")
+      .mockImplementation(() => undefined);
+
+    expect(forRootOptions({ ...credentials, serviceId: NAMED }).serviceId).toBe(
+      SENT,
+    );
+    expect(SENT).toHaveLength(100);
+    expect(warn).toHaveBeenCalledWith(
+      `serviceId "${NAMED}" is sent as "${SENT}": the collector takes at most 100 characters.`,
+    );
+  });
+
+  it("cuts one on both async paths as well", async () => {
+    vi.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
+    class OptionsFactory implements ObserveOptionsFactory {
+      createObserveOptions() {
+        return { ...credentials, serviceId: NAMED };
+      }
+    }
+    const [fromFactory] = ObserveModule.createAsyncProviders({
+      useFactory: () => ({ ...credentials, serviceId: NAMED }),
+    });
+    const [fromClass] = ObserveModule.createAsyncProviders({
+      useClass: OptionsFactory,
+    });
+
+    await expect(
+      (fromFactory as FactoryProvider).useFactory(),
+    ).resolves.toMatchObject({ serviceId: SENT });
+    await expect(
+      (fromClass as FactoryProvider).useFactory(new OptionsFactory()),
+    ).resolves.toMatchObject({ serviceId: SENT });
   });
 });

@@ -49,6 +49,7 @@ import {
   fitServiceVersion,
   MAX_SERVICE_VERSION_LENGTH,
 } from "./utils/fit-service-version.util.js";
+import { fitToLength } from "./utils/fit-to-length.util.js";
 import { inferServiceVersion } from "./utils/infer-service-version.util.js";
 import { LogRedactor } from "./utils/log-redactor.js";
 
@@ -59,6 +60,30 @@ import { LogRedactor } from "./utils/log-redactor.js";
  */
 const MISSING_ASYNC_OPTIONS_PROVIDER =
   'ObserveModule.forRootAsync() requires one of "useFactory", "useClass" or "useExisting".';
+
+/**
+ * The longest `serviceId` the collector accepts. It rides on every batch, and
+ * a longer one is not cut there: every batch would be refused.
+ */
+const MAX_SERVICE_ID_LENGTH = 100;
+
+/**
+ * `serviceId`, cut to what the collector accepts the way a named release is,
+ * with a warning when the application starts.
+ */
+function withServiceId<Options extends Pick<ObserveOptions, "serviceId">>(
+  options: Options,
+): Options {
+  const named = options.serviceId;
+  if (typeof named !== "string" || named.length <= MAX_SERVICE_ID_LENGTH) {
+    return options;
+  }
+  const sent = fitToLength(named, MAX_SERVICE_ID_LENGTH);
+  new Logger("ObserveModule").warn(
+    `serviceId "${named}" is sent as "${sent}": the collector takes at most ${MAX_SERVICE_ID_LENGTH} characters.`,
+  );
+  return { ...options, serviceId: sent };
+}
 
 /**
  * Names the release when the application did not, so Releases, regressions
@@ -197,10 +222,12 @@ export function createObserveModule<Store extends Record<string, unknown>>(
         providers: [
           {
             provide: OBSERVE_OPTIONS,
-            useValue: withServiceVersion({
-              ...options,
-              ...observeOpts,
-            }),
+            useValue: withServiceVersion(
+              withServiceId({
+                ...options,
+                ...observeOpts,
+              }),
+            ),
           },
         ],
       };
@@ -246,10 +273,12 @@ export function createObserveModule<Store extends Record<string, unknown>>(
           provide: OBSERVE_OPTIONS,
           useFactory: async (...args: any[]) => {
             const opts = await useFactory(...args);
-            return withServiceVersion({
-              ...options,
-              ...opts,
-            });
+            return withServiceVersion(
+              withServiceId({
+                ...options,
+                ...opts,
+              }),
+            );
           },
           inject: asyncOptions.inject || [],
         };
@@ -262,10 +291,12 @@ export function createObserveModule<Store extends Record<string, unknown>>(
       return {
         provide: OBSERVE_OPTIONS,
         useFactory: async (optionsFactory: ObserveOptionsFactory) =>
-          withServiceVersion({
-            ...options,
-            ...(await optionsFactory.createObserveOptions()),
-          }),
+          withServiceVersion(
+            withServiceId({
+              ...options,
+              ...(await optionsFactory.createObserveOptions()),
+            }),
+          ),
         inject: [optionsFactoryToken],
       };
     }

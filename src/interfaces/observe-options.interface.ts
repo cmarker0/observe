@@ -187,6 +187,10 @@ export interface ObserveOptions {
    * If you anticipate running multiple instances of the same service,
    * consider using a unique identifier such as a hostname or container ID.
    * This helps in distinguishing between different instances of the service in the APM.
+   *
+   * At most 100 characters, the longest the collector accepts. A longer one is
+   * cut to fit, with a warning when the application starts: its first 91 and a
+   * hash of the whole, so two ids that differ only past the cut stay apart.
    */
   serviceId: string;
 
