@@ -125,7 +125,11 @@ describe("ObserveAgentWorker options", () => {
     expect(runtimeMetricsStarted()).toBe(false);
   });
 
-  it("collects nothing when the option is not set", () => {
+  it("treats an unset option as off, leaving the default to the metrics service", () => {
+    // Not what an application sees: by the time the worker reads the option,
+    // NodeRuntimeMetricsService - which it is injected with - has defaulted it
+    // to true in its own constructor. The stub here does not, which leaves the
+    // worker's own reading under test, so the default lives in one place.
     build({}).onModuleInit();
 
     expect(runtimeMetricsStarted()).toBe(false);
