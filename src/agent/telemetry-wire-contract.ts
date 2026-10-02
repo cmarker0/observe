@@ -165,6 +165,11 @@ const RUNTIME_METRICS: Shape = {
  * Every reading - `v`, `iv` and a summary's six distribution fields - is a map
  * from label to number, keyed by whatever labels the application chose, so the
  * contract declares the map rather than its entries. `l` is the label names.
+ *
+ * The collector also bounds each map - finite numbers, at most 1000 keys of at
+ * most 255 characters - and refuses the whole batch over one that is not. The
+ * metric classes keep within those bounds at the source, where a bad reading
+ * can still be dropped on its own.
  */
 const CUSTOM_METRIC: Shape = {
   n: { type: "string", required: true },

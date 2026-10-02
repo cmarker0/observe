@@ -33,22 +33,42 @@ export function stringifyLabel(label: Record<string, string | number>): string {
 export const MAX_SERIES_PER_METRIC = 1_000;
 
 /**
- * Whether a metric may record under `key`.
+ * The longest series key - the serialised label combination - the collector
+ * accepts. A longer one is not truncated there: the whole batch it rides in is
+ * refused, logs and spans included.
+ */
+const MAX_SERIES_KEY_LENGTH = 255;
+
+/**
+ * Whether a metric may record under `key`: a series it already has, or a new
+ * one that is within the cap and short enough for the collector.
  *
  * Refuses rather than throws. This runs inside a customer's own code path -
  * `counter.increment({ userId })` in the middle of their request handler - and
  * an agent that crashes the application it is measuring is worse than one that
- * drops a series. The first refusal is logged, once per metric, because a
- * silent cap is indistinguishable from a metric that does not work.
+ * drops a series. The first refusal of each kind is logged, once per metric,
+ * because a silent cap is indistinguishable from a metric that does not work.
  */
 export function admitsSeries(
   metricName: string,
   values: Record<string, unknown>,
   key: string,
-  state: { warned: boolean },
+  state: { warned: boolean; longKeyWarned?: boolean },
 ): boolean {
   if (key in values) {
     return true;
+  }
+
+  if (key.length > MAX_SERIES_KEY_LENGTH) {
+    if (!state.longKeyWarned) {
+      state.longKeyWarned = true;
+      console.warn(
+        `[observe] Metric "${metricName}" ignored a label combination of ${key.length} characters; ` +
+          `the collector accepts at most ${MAX_SERIES_KEY_LENGTH} and refuses the whole batch over a longer one. ` +
+          `Shorter label values - an id rather than a URL, say - keep recording.`,
+      );
+    }
+    return false;
   }
 
   // `warned` doubles as a "cap reached" latch: series are never removed, so

@@ -89,3 +89,50 @@ describe("series cardinality cap", () => {
     });
   });
 });
+
+describe("series key length", () => {
+  let warn: MockInstance;
+
+  beforeEach(() => {
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  // A series key is the label combination as JSON - `{"url":"..."}`, ten
+  // characters around the value - so this builds a key of exactly `length`.
+  const url = (length: number) => ({ url: "/".padEnd(length - 10, "a") });
+
+  it("refuses a combination longer than the collector accepts", () => {
+    const counter = new Counter<"url">("hits", "d", ["url"]);
+
+    counter.increment(url(256));
+    counter.increment(url(300));
+    counter.increment({ url: "/short" });
+
+    // One key over 255 characters and the collector refuses the whole batch,
+    // logs and spans included - not just this metric.
+    expect(Object.keys(counter.value)).toEqual(['{"url":"/short"}']);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain('"hits"');
+  });
+
+  it("admits one of exactly the longest length", () => {
+    const counter = new Counter<"url">("hits", "d", ["url"]);
+
+    counter.increment(url(255));
+
+    expect(Object.keys(counter.value)).toEqual([JSON.stringify(url(255))]);
+  });
+
+  it("refuses one on a gauge too, in either direction", () => {
+    const gauge = new Gauge<"url">("in_flight", { labels: ["url"] });
+
+    gauge.increment(url(256));
+    gauge.decrement(url(300));
+
+    expect(Object.keys(gauge.value)).toEqual(["default"]);
+  });
+});
