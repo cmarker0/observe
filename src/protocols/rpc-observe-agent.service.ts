@@ -179,7 +179,6 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
         }
       }
 
-      // setImmediate(() => {
       if (this.options.rpc?.ignore?.(transportId, ctx)) {
         return done();
       }
@@ -197,7 +196,6 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
         tags: this.options.rpc?.tags,
       });
       return done();
-      // });
     });
   }
 

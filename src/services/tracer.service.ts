@@ -45,8 +45,6 @@ export class TracerService<
     name: string,
     callback: (span: TraceSpanDelegate) => unknown | Promise<unknown>,
   ) {
-    // await new Promise(resolve => setImmediate(resolve));
-
     const store = this.als.getStore();
     if (!store) {
       throw new Error(
@@ -72,8 +70,6 @@ export class TracerService<
    * @returns {Promise<TraceSpanDelegate>} A promise that resolves to the active span delegate.
    */
   async activeSpan(): Promise<TraceSpanDelegate> {
-    // await new Promise((resolve) => setImmediate(resolve));
-
     const store = this.als.getStore();
     if (!store) {
       throw new Error(
@@ -125,8 +121,6 @@ export class TracerService<
     error: Error,
     tags?: Record<string, string | number | boolean>,
   ) {
-    // await new Promise((resolve) => setImmediate(resolve));
-
     const store = this.als.getStore();
     if (!store) {
       throw new Error(

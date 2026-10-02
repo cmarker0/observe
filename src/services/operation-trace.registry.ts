@@ -792,8 +792,6 @@ export class OperationTraceRegistry {
     name: string,
     spanFunction: (span: TraceSpanDelegate) => any,
   ) {
-    // await new Promise((resolve) => setImmediate(resolve));
-
     // The caller may already have completed (its entry survives completion in
     // `refsByCaller`); it is still the right source for the class and method
     // labels, which outlive completion. Where the new span *attaches* is
@@ -840,7 +838,6 @@ export class OperationTraceRegistry {
     refsByCaller?.set(newNodeId, manualSpan);
 
     const onResponse = (res: unknown) => {
-      // setImmediate
       this.internalEndTraceStep(
         traceId,
         newNodeId,
@@ -851,8 +848,6 @@ export class OperationTraceRegistry {
       return res;
     };
     const onError = (err: unknown) => {
-      // setTimeout(
-      //   () =>
       this.internalEndTraceStep(
         traceId,
         newNodeId,
@@ -861,8 +856,6 @@ export class OperationTraceRegistry {
         newNodeId,
         err as Error | string | object,
       );
-      //   0,
-      // );
       // Re-throw the error to maintain original behavior
       throw err;
     };
