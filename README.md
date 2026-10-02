@@ -32,8 +32,11 @@ Install it, set two environment variables, and the application starts reporting:
 - **Distributed traces** with per-span self time, correlated across services.
 - **Errors**, grouped by fingerprint, with the source frame and the trace that
   produced them.
-- **Logs**, correlated to the request that wrote them.
-- **Runtime and custom metrics**.
+- **Logs**, correlated to the request that wrote them, once `forwardLogs` is
+  on.
+- **Runtime metrics**, and the
+  [custom metrics](https://www.observe.nestjs.com/documentation/sdk#custom-metrics)
+  your code reports through `TracerService`.
 
 Telemetry is serialised on a detached worker thread and shipped from there, so
 the request path is untouched by the reporting.
@@ -243,8 +246,9 @@ Once the module and the instrument are in place, the agent reports, with no furt
 
 - **Requests, GraphQL operations, RPC messages, WebSocket gateway messages, queue jobs and scheduled jobs**, each with its tree of provider method calls.
 - **Database queries**, as a span under the method that ran them, for `pg`, `mysql2` and `mongodb`. Anything built on those drivers is covered without being known by name: TypeORM, Drizzle, MikroORM and Mongoose are tested in this repository, and others (Knex, Sequelize) go through the same driver calls. The statement is recorded with every value removed (`SELECT "o"."id" FROM "orders" "o" WHERE "o"."customer_id" = $1`). Prisma's Rust query engine does not go through these drivers and is not covered yet.
-- **Outbound HTTP calls** made with `fetch`/`undici` or `node:http`/`https` (so Axios too), as `POST api.stripe.com`. The current trace id is forwarded as `x-request-id`, so a service that also runs the agent continues the same trace; a header you set yourself is never overwritten.
+- **Outbound HTTP calls** made with `fetch`/`undici` or `node:http`/`https` (so Axios too), as `POST api.stripe.com`. The current trace id is forwarded as `x-request-id` - by `fetch` on every supported Node version, by `node:http`/`https` from Node 22.12, the first to let a request's headers still be set at that point - so a service that also runs the agent continues the same trace; a header you set yourself is never overwritten.
 - **Trace ids across queues**: a BullMQ (Pro included) or Bull job enqueued while handling a request carries that request's trace id, so the request and its job show up as one trace. Repeatable (cron) jobs start their own.
+- **The code around an error's throw site**: for each in-app frame of a captured error, a few lines of source either side, read from the running process, so the dashboard shows the failing code next to the stack. This sends fragments of your application's source to Observe, stored with the error. Frames in `node_modules` and Node internals are never read. `createObserveModule({ sourceContext: false })` turns it off; the [documentation](https://www.observe.nestjs.com/documentation/sdk#error-source-context) covers tuning it instead.
 - **The release it is running**, so Releases, regressions and fix verification work without a version threaded through the build: `OBSERVE_SERVICE_VERSION` if the environment sets it, else the commit a platform or CI job exposes (Vercel, Render, Railway, Heroku, GitHub Actions, GitLab CI and others), else the commit checked out where the process runs, else a Cloud Run or Azure Container Apps revision. A container image usually carries none of these, so hand it the commit at build time - `ARG GIT_SHA` then `ENV OBSERVE_SERVICE_VERSION=$GIT_SHA`. `serviceVersion` names the release yourself, in at most 50 characters - a longer one is cut to fit, with a warning at startup; `serviceVersion: false` reports none.
 
 Query and outbound-HTTP spans are not billed as events. Turn them off with `outgoing: false`, or one side with `outgoing: { database: false }` / `outgoing: { http: false }`.
@@ -305,6 +309,47 @@ Declarations are checked when the application starts, and whatever fails is logg
 
 SLOs need a plan that has them - Scale or Enterprise. On any other plan, declarations are sent and ignored. The [documentation](https://www.observe.nestjs.com/documentation/sdk#declaring-objectives-in-code) has the rest.
 
+## Configuration
+
+Every option, with its default. The [documentation](https://www.observe.nestjs.com/documentation/sdk) covers each in more depth.
+
+`ObserveModule.forRoot()`, and the factory behind `forRootAsync()`, take:
+
+| Option                   | Default                             | What it does                                                                                                                                                                                      |
+| ------------------------ | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `appKey`, `appSecret`    | required                            | The credentials the dashboard issues - see [Getting credentials](#getting-credentials).                                                                                                           |
+| `serviceId`              | required                            | Names the service in the dashboard.                                                                                                                                                               |
+| `serviceVersion`         | inferred                            | The release the process runs, at most 50 characters - see [What it records without any code](#what-it-records-without-any-code). `false` reports none.                                          |
+| `endpoint`               | `https://observe-api.nestjs.com`    | The collector's base URL. `OBSERVE_ENDPOINT` in the environment changes the default without touching the config.                                                                                  |
+| `flushInterval`          | `5000`                              | Milliseconds between sends of buffered telemetry; at least `1000`.                                                                                                                                |
+| `maxTracesPerBatch`      | `1000`                              | The most traces one send carries.                                                                                                                                                                 |
+| `tracesSampleRate`       | `1.0`                               | The share of traces kept, or a function `(protocol, attributes) => boolean` deciding per trace. `0` counts as unset and keeps every trace; `() => false` keeps none.                              |
+| `spanCollapse`           | `{ threshold: 20, keepSlowest: 3 }` | See [Repeated spans](#repeated-spans). `false` ships every span.                                                                                                                                  |
+| `skipSpans`              | none                                | See [Skipping spans for expected outcomes](#skipping-spans-for-expected-outcomes).                                                                                                                |
+| `runtimeMetrics`         | `true`                              | Samples memory, CPU, garbage collection and the event loop for the dashboard's [Profiler](https://www.observe.nestjs.com/documentation/profiler).                                                 |
+| `runtimeMetricsInterval` | `60000`                             | Milliseconds between runtime samples; at least `30000`.                                                                                                                                           |
+| `forwardLogs`            | `false`                             | Sends the application's log lines, each correlated to the trace it was written in - see [Logs](https://www.observe.nestjs.com/documentation/sdk#logs).                                           |
+| `redaction`              | on                                  | How log lines, error messages and captured requests are scrubbed before they leave the process: `enabled`, `useDefaultPatterns`, `patterns`, `keys` and `replacement`.                           |
+| `outgoing`               | on                                  | Query and outbound-HTTP spans. `false` turns both off; `{ database: false }` or `{ http: false }` one of them.                                                                                    |
+| `http`                   |                                     | `ignore`, `tags`, `setAttributes`, `getUserId` and `queryParamsObfuscateRegex` for HTTP requests, and `capture` - see [Capturing failed and slow requests](#capturing-failed-and-slow-requests). |
+| `rpc`, `grpc`            |                                     | `ignore`, `tags`, `setAttributes` and `getUserId` for microservice and gRPC handlers.                                                                                                             |
+| `graphql`                |                                     | The same four, once per GraphQL operation.                                                                                                                                                        |
+| `ws`                     |                                     | The same four, once per gateway message.                                                                                                                                                          |
+| `jobs`                   |                                     | `ignore`, `tags` and `setAttributes` for queue jobs and scheduled handlers.                                                                                                                       |
+| `debug`                  | `false`                             | Logs the SDK's own diagnostics.                                                                                                                                                                   |
+
+`forRootAsync()` also takes `extraProviders`, and `global`, which defaults to `true` - `forRoot()` always registers the module globally.
+
+`createObserveModule()` takes the options the instrumentation needs before any module exists:
+
+| Option                | Default                                  | What it does                                                                                                                                                                                         |
+| --------------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sourceContext`       | `true`                                   | Attaches the source around each in-app frame of a captured error - see [What it records without any code](#what-it-records-without-any-code). `{ linesOfContext, maxFrames, sourceMaps }` tunes it. |
+| `traceIdGenerator`    | the `x-request-id` header, else a UUIDv7 | Gives each request its trace id.                                                                                                                                                                     |
+| `traceIdKey`          | `'traceId'`                              | The key the trace id is stored under in the request context.                                                                                                                                         |
+| `attachTraceIdToLogs` | `true`                                   | Adds the trace id to the `ConsoleLogger`'s own output, on Nest 11.2 and later. Sending lines to the dashboard is `forwardLogs`.                                                                       |
+| `skipInstrumentation` | `() => false`                            | Returns `true` for a provider instance that must not be instrumented.                                                                                                                                |
+
 ## Optional peer dependencies
 
 Protocol integrations are only loaded when you use them, and their packages are optional peers:
@@ -320,12 +365,29 @@ Protocol integrations are only loaded when you use them, and their packages are 
 ## Test
 
 ```bash
+# the lockfile is written with legacy-peer-deps on, and has to be read that way
+$ npm ci --legacy-peer-deps
+
 # unit tests
 $ npm test
+
+# type-check the sources and the specs
+$ npm run typecheck
 
 # integration tests (boot real Nest apps on real ports)
 $ npm run test:int
 ```
+
+The queue suites need a Redis, and the query-span suites a PostgreSQL, MySQL and MongoDB. Each suite skips itself when its server does not answer, so without them `test:int` passes having tested less. CI starts them with these ports and credentials, which the suites default to:
+
+```bash
+$ docker run -d -p 6379:6379 redis:7-alpine
+$ docker run -d -p 54321:5432 -e POSTGRES_PASSWORD=postgres-whisprr postgres:16-alpine
+$ docker run -d -p 3306:3306 -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=test mysql:8
+$ docker run -d -p 27027:27017 mongo:8
+```
+
+To point them elsewhere, set `REDIS_HOST`/`REDIS_PORT`, `PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE`, `MYSQL_HOST`/`MYSQL_PORT`/`MYSQL_USER`/`MYSQL_PASSWORD`/`MYSQL_DATABASE` or `MONGO_HOST`/`MONGO_PORT`.
 
 ## Module format
 
