@@ -1,18 +1,29 @@
+import { constants, type PerformanceEntry } from "node:perf_hooks";
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/observe-options.interface.js";
 import { NodeRuntimeMetricsService } from "./node-runtime-metrics.service.js";
 
 /**
  * Samples the process every flush. The interesting behaviour is not the numbers
- * themselves - they come from Node - but the bookkeeping around them: CPU is a
- * *delta* against the previous sample, GC counters describe one window and must
- * reset after being read, and the monitors have to be torn down or they outlive
- * the application.
+ * themselves - they come from Node - but the bookkeeping around them: every
+ * figure describes one window, so CPU and event loop utilisation are *deltas*
+ * against the previous sample, the delay histogram and GC counters must reset
+ * after being read, and the monitors have to be torn down or they outlive the
+ * application.
  */
 describe("NodeRuntimeMetricsService", () => {
   const build = (options: Partial<ObserveModuleOptionsWithDefaults> = {}) =>
     new NodeRuntimeMetricsService({
       ...options,
     } as ObserveModuleOptionsWithDefaults);
+  const sleep = (ms: number) =>
+    new Promise((resolve) => setTimeout(resolve, ms));
+  // Holds the event loop the way a synchronous request handler would.
+  const block = (ms: number) => {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      /* burn */
+    }
+  };
 
   let service: NodeRuntimeMetricsService;
 
@@ -45,10 +56,7 @@ describe("NodeRuntimeMetricsService", () => {
       service.collectNodeRuntimeMetrics();
 
       // Busy-wait so the second window has measurable CPU in it.
-      const until = Date.now() + 20;
-      while (Date.now() < until) {
-        /* burn */
-      }
+      block(20);
       const second = service.collectNodeRuntimeMetrics();
 
       // A cumulative reading would grow forever and make "CPU used this minute"
@@ -81,7 +89,7 @@ describe("NodeRuntimeMetricsService", () => {
     it("reports event loop lag in milliseconds and a utilisation ratio", async () => {
       // Give the histogram a moment to collect a sample so the conversion is
       // actually exercised.
-      await new Promise((resolve) => setTimeout(resolve, 30));
+      await sleep(30);
       const metrics = service.collectNodeRuntimeMetrics();
 
       // The histogram is in nanoseconds; shipping those as "lag" would read as a
@@ -90,6 +98,50 @@ describe("NodeRuntimeMetricsService", () => {
       expect(metrics.eventLoop.lag).toBeLessThan(60_000);
       expect(metrics.eventLoop.utilization).toBeGreaterThanOrEqual(0);
       expect(metrics.eventLoop.utilization).toBeLessThanOrEqual(1);
+    });
+
+    it("does not carry delay samples over into the next window", async () => {
+      await sleep(100);
+      const first = service.collectNodeRuntimeMetrics();
+      const second = service.collectNodeRuntimeMetrics();
+
+      // The histogram cannot tick between two synchronous reads, so the second
+      // window holds no samples at all. Carried over, the first window's would
+      // be reported again - and in a long-running process every window would
+      // be the mean since startup, which nothing moves.
+      expect(first.eventLoop.lag).toBeGreaterThan(0);
+      expect(second.eventLoop.lag).toBe(0);
+    });
+
+    it("reports a stall at full weight in the window it happened in", async () => {
+      // A quiet stretch first, standing in for a process that has been up for
+      // a while: averaged together with it, the stall would barely register.
+      await sleep(300);
+      const quiet = service.collectNodeRuntimeMetrics();
+
+      // The histogram has to tick once after the reset before it can measure
+      // anything; a stall that starts sooner is recorded in neither window.
+      await sleep(20);
+      block(200);
+      await sleep(25);
+      const stalled = service.collectNodeRuntimeMetrics();
+
+      expect(stalled.eventLoop.lag).toBeGreaterThan(quiet.eventLoop.lag * 2);
+    });
+
+    it("reports utilisation for the window rather than since startup", async () => {
+      // The baseline is taken when monitoring starts, so this window is nearly
+      // all work...
+      block(100);
+      const busy = service.collectNodeRuntimeMetrics();
+      // ...and this one nearly all waiting. Read cumulatively, both would be
+      // the process lifetime's ratio, and a busy minute in a long-running
+      // process would not show.
+      await sleep(100);
+      const idle = service.collectNodeRuntimeMetrics();
+
+      expect(busy.eventLoop.utilization).toBeGreaterThan(0.5);
+      expect(idle.eventLoop.utilization).toBeLessThan(0.5);
     });
 
     it("reports a GC section on every sample", () => {
@@ -122,6 +174,81 @@ describe("NodeRuntimeMetricsService", () => {
       // overwritten by the next sample before it was serialised.
       expect(first).not.toBe(second);
       expect(first.gc).not.toBe(second.gc);
+    });
+  });
+
+  describe("garbage collection breakdown", () => {
+    // A collection of a given kind cannot be provoked on demand, so each window
+    // is fed the entries Node would deliver. It is opened and read
+    // synchronously, and the real observer only delivers on a later tick, so
+    // nothing else can land in it.
+    const windowOf = (...entries: { kind: number; duration: number }[]) => {
+      service.collectNodeRuntimeMetrics();
+      for (const { kind, duration } of entries) {
+        (
+          service as unknown as {
+            recordGarbageCollection(entry: PerformanceEntry): void;
+          }
+        ).recordGarbageCollection({
+          entryType: "gc",
+          duration,
+          detail: { kind },
+        } as unknown as PerformanceEntry);
+      }
+      return service.collectNodeRuntimeMetrics().gc;
+    };
+
+    beforeEach(() => {
+      service = build();
+      service.onModuleInit();
+    });
+
+    it("buckets each collection by the kind Node reports", () => {
+      const gc = windowOf(
+        { kind: constants.NODE_PERFORMANCE_GC_MINOR, duration: 1 },
+        { kind: constants.NODE_PERFORMANCE_GC_MAJOR, duration: 10 },
+        { kind: constants.NODE_PERFORMANCE_GC_INCREMENTAL, duration: 100 },
+      );
+
+      // Scavenges used to be reported as major collections, major collections
+      // as incremental marking, and incremental marking not at all.
+      expect(gc.breakdown).toEqual({
+        minor: { count: 1, duration: 1 },
+        major: { count: 1, duration: 10 },
+        incremental: { count: 1, duration: 100 },
+      });
+    });
+
+    it("counts a young-generation mark-sweep as a minor collection", () => {
+      // V8's `kGCTypeMinorMarkSweep`, which replaces the scavenger under
+      // `--minor-ms`. Spelled out because Node only names it from 24.20.
+      const gc = windowOf({ kind: 2, duration: 5 });
+
+      expect(gc.breakdown?.minor).toEqual({ count: 1, duration: 5 });
+    });
+
+    it("counts weak-callback passes towards the totals but no bucket", () => {
+      const gc = windowOf(
+        { kind: constants.NODE_PERFORMANCE_GC_WEAKCB, duration: 3 },
+        { kind: constants.NODE_PERFORMANCE_GC_MINOR, duration: 1 },
+      );
+
+      // Finalisers running after a collection are GC time on the main thread,
+      // but not a collection of either generation.
+      expect(gc.count).toBe(2);
+      expect(gc.totalDuration).toBe(4);
+      expect(gc.breakdown).toEqual({
+        minor: { count: 1, duration: 1 },
+        major: { count: 0, duration: 0 },
+        incremental: { count: 0, duration: 0 },
+      });
+    });
+
+    it("starts every window's breakdown empty", () => {
+      windowOf({ kind: constants.NODE_PERFORMANCE_GC_MAJOR, duration: 10 });
+
+      // Read straight after, so no collection can have landed in between.
+      expect(service.collectNodeRuntimeMetrics().gc.breakdown).toEqual({});
     });
   });
 
