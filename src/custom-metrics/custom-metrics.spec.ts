@@ -1,3 +1,4 @@
+import type { MockInstance } from "vitest";
 import { Counter } from "./counter.js";
 import { Gauge } from "./gauge.js";
 import { Summary } from "./summary.js";
@@ -311,16 +312,6 @@ describe("Summary", () => {
     expect(summary.total.default).toBeGreaterThan(0);
   });
 
-  it("rejects a non-finite observation", () => {
-    const summary = new Summary("latency");
-
-    // NaN would poison every quantile derived from the sample.
-    expect(() => summary.observe(Number.NaN)).toThrow(/non-finite/);
-    expect(() => summary.observe(Number.POSITIVE_INFINITY)).toThrow(
-      /non-finite/,
-    );
-  });
-
   it("keeps an independent distribution per label", () => {
     const summary = new Summary<"route">("latency", { labels: ["route"] });
 
@@ -349,5 +340,130 @@ describe("Summary", () => {
     // observations forward would smear a spike across every window after it.
     expect(summary.observations.default).toBe(1);
     expect(summary.maximum.default).toBe(100);
+  });
+});
+
+/**
+ * A NaN or an Infinity is usually computed from the application's own data, in
+ * the middle of its own request handler, so it is ignored rather than thrown -
+ * as a series past the cap is: the host application must keep running.
+ * Recorded, it would reach the collector as null.
+ */
+describe("non-finite values", () => {
+  let warn: MockInstance;
+
+  beforeEach(() => {
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  describe("counter", () => {
+    it("ignores one and keeps counting", () => {
+      const counter = new Counter("orders");
+
+      counter.increment(Number.NaN);
+      counter.increment(Number.POSITIVE_INFINITY);
+      counter.increment(2);
+
+      // Added in, a single NaN left the counter NaN for the life of the process.
+      expect(counter.getValue()).toBe(2);
+    });
+
+    it("does not open a series for one", () => {
+      const counter = new Counter<"route">("hits", "d", ["route"]);
+
+      counter.increment({ route: "/a" }, Number.NaN);
+
+      expect(counter.value).toEqual({});
+      counter.increment({ route: "/a" }, 3);
+      expect(counter.getValue({ route: "/a" })).toBe(3);
+    });
+
+    it("starts from zero rather than a non-finite initial value", () => {
+      const counter = new Counter("resumed", "d", Number.NaN);
+
+      counter.increment();
+
+      expect(counter.getValue()).toBe(1);
+    });
+  });
+
+  describe("gauge", () => {
+    it("ignores one in every operation", () => {
+      const gauge = new Gauge("cpu");
+      gauge.setValue(40);
+
+      gauge.setValue(Number.NaN);
+      gauge.increment(Number.POSITIVE_INFINITY);
+      gauge.decrement(Number.NEGATIVE_INFINITY);
+
+      expect(gauge.getValue()).toBe(40);
+    });
+
+    it("ignores one on a label, without opening a series for it", () => {
+      const gauge = new Gauge<"pool">("connections", { labels: ["pool"] });
+      gauge.increment({ pool: "main" }, 5);
+
+      gauge.setValue({ pool: "main" }, Number.NaN);
+      gauge.increment({ pool: "main" }, Number.NaN);
+      gauge.decrement({ pool: "replica" }, Number.NaN);
+
+      expect(gauge.getValue({ pool: "main" })).toBe(5);
+      expect(Object.keys(gauge.value)).not.toContain('{"pool":"replica"}');
+    });
+
+    it("starts from zero rather than a non-finite initial value", () => {
+      const gauge = new Gauge("level", {
+        initialValue: Number.POSITIVE_INFINITY,
+      });
+
+      expect(gauge.getValue()).toBe(0);
+    });
+  });
+
+  describe("summary", () => {
+    it("ignores one rather than throwing", () => {
+      const summary = new Summary("latency");
+      summary.observe(10);
+
+      // Thrown, it failed whatever request was being measured.
+      expect(() => summary.observe(Number.NaN)).not.toThrow();
+      summary.observe(Number.POSITIVE_INFINITY);
+      summary.observe(30);
+
+      // Recorded, it would poison every quantile and the total.
+      expect(summary.observations.default).toBe(2);
+      expect(summary.total.default).toBe(40);
+      expect(summary.p99.default).toBe(30);
+    });
+  });
+
+  it("warns once per metric, naming it", () => {
+    const orders = new Counter("orders");
+    const latency = new Summary("latency");
+
+    orders.increment(Number.NaN);
+    orders.increment(Number.NaN);
+    latency.observe(Number.NaN);
+
+    // A silent refusal is indistinguishable from a metric that does not work.
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(warn.mock.calls[0][0]).toContain('"orders"');
+    expect(warn.mock.calls[1][0]).toContain('"latency"');
+  });
+
+  it("still throws for a mistake in the call, whatever the value", () => {
+    // A missing label fails on every run rather than on unlucky data, so
+    // refusing it quietly would only hide the bug.
+    const counter = new Counter<"route">("hits", "d", ["route"]);
+    const summary = new Summary<"route">("latency", { labels: ["route"] });
+
+    expect(() => counter.increment(Number.NaN)).toThrow(
+      /without specifying a label/,
+    );
+    expect(() => summary.observe(Number.NaN)).toThrow(/without specifying one/);
   });
 });

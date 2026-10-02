@@ -1,4 +1,5 @@
 import { CustomMetric } from "../interfaces/custom-metric.interface.js";
+import { admitsFinite } from "./finite-value.util.js";
 
 const DEFAULT_LABEL = "default" as const;
 
@@ -77,6 +78,9 @@ export class Counter<TLabel extends string = typeof DEFAULT_LABEL>
    * assignable to the structural type such a helper can name.
    */
   private readonly seriesLimit = { warned: false };
+
+  /** Whether a non-finite value has already been reported, likewise. */
+  private readonly nonFinite = { warned: false };
 
   /**
    * The name of the counter.
@@ -206,8 +210,13 @@ export class Counter<TLabel extends string = typeof DEFAULT_LABEL>
     this.description = description;
     this.type = "counter";
 
-    this._initialValue =
+    const initialValue =
       typeof labelsOrInitialValue === "number" ? labelsOrInitialValue : 0;
+    // Every series starts from this, so a non-finite one is replaced rather
+    // than poisoning all of them.
+    this._initialValue = admitsFinite(name, initialValue, this.nonFinite)
+      ? initialValue
+      : 0;
     if (Array.isArray(labelsOrInitialValue)) {
       this.labels = labelsOrInitialValue;
       this.value = {};
@@ -298,16 +307,20 @@ export class Counter<TLabel extends string = typeof DEFAULT_LABEL>
       this.validateLabels(labelOrValue);
 
       const stringifiedLabel = stringifyLabel(labelOrValue);
+      const incrementValue = value ?? 1;
       if (
+        !admitsFinite(this.name, incrementValue, this.nonFinite) ||
         !admitsSeries(this.name, this.value, stringifiedLabel, this.seriesLimit)
       ) {
         return;
       }
-      const incrementValue = value ?? 1;
       this.value[stringifiedLabel] =
         (this.value[stringifiedLabel] ?? this._initialValue) + incrementValue;
     } else {
       const incrementValue = labelOrValue ?? 1;
+      if (!admitsFinite(this.name, incrementValue, this.nonFinite)) {
+        return;
+      }
       this.value[DEFAULT_LABEL] =
         (this.value[DEFAULT_LABEL] ?? this._initialValue) + incrementValue;
     }

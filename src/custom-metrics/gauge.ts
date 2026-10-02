@@ -1,5 +1,6 @@
 import { CustomMetric } from "../interfaces/custom-metric.interface.js";
 import { admitsSeries, stringifyLabel } from "./counter.js";
+import { admitsFinite } from "./finite-value.util.js";
 
 const DEFAULT_LABEL = "default" as const;
 
@@ -20,6 +21,9 @@ export class Gauge<TLabel extends string = typeof DEFAULT_LABEL>
    * assignable to the structural type such a helper can name.
    */
   private readonly seriesLimit = { warned: false };
+
+  /** Whether a non-finite value has already been reported, likewise. */
+  private readonly nonFinite = { warned: false };
 
   /**
    * The name of the gauge.
@@ -118,7 +122,12 @@ export class Gauge<TLabel extends string = typeof DEFAULT_LABEL>
     this.kind = attributes?.kind;
     this.type = "gauge";
 
-    this._initialValue = attributes?.initialValue ?? 0;
+    const initialValue = attributes?.initialValue ?? 0;
+    // Every series starts from this, so a non-finite one is replaced rather
+    // than poisoning all of them.
+    this._initialValue = admitsFinite(name, initialValue, this.nonFinite)
+      ? initialValue
+      : 0;
     // Optional, like every other read of `attributes`. Without this the
     // single-argument overload the class advertises - `new Gauge("name")` -
     // threw "Cannot read properties of undefined".
@@ -206,16 +215,20 @@ export class Gauge<TLabel extends string = typeof DEFAULT_LABEL>
       this.validateLabels(labelOrValue);
 
       const stringifiedLabel = stringifyLabel(labelOrValue);
+      const incrementValue = value ?? 1;
       if (
+        !admitsFinite(this.name, incrementValue, this.nonFinite) ||
         !admitsSeries(this.name, this.value, stringifiedLabel, this.seriesLimit)
       ) {
         return;
       }
-      const incrementValue = value ?? 1;
       this.value[stringifiedLabel] =
         (this.value[stringifiedLabel] ?? this._initialValue) + incrementValue;
     } else {
       const incrementValue = labelOrValue ?? 1;
+      if (!admitsFinite(this.name, incrementValue, this.nonFinite)) {
+        return;
+      }
       this.value[DEFAULT_LABEL] =
         (this.value[DEFAULT_LABEL] ?? this._initialValue) + incrementValue;
     }
@@ -260,16 +273,20 @@ export class Gauge<TLabel extends string = typeof DEFAULT_LABEL>
       this.validateLabels(labelOrValue);
 
       const stringifiedLabel = stringifyLabel(labelOrValue);
+      const decrementValue = value ?? 1;
       if (
+        !admitsFinite(this.name, decrementValue, this.nonFinite) ||
         !admitsSeries(this.name, this.value, stringifiedLabel, this.seriesLimit)
       ) {
         return;
       }
-      const decrementValue = value ?? 1;
       this.value[stringifiedLabel] =
         (this.value[stringifiedLabel] ?? this._initialValue) - decrementValue;
     } else {
       const decrementValue = labelOrValue ?? 1;
+      if (!admitsFinite(this.name, decrementValue, this.nonFinite)) {
+        return;
+      }
       this.value[DEFAULT_LABEL] =
         (this.value[DEFAULT_LABEL] ?? this._initialValue) - decrementValue;
     }
@@ -315,7 +332,11 @@ export class Gauge<TLabel extends string = typeof DEFAULT_LABEL>
         );
       }
 
-      this.value[stringifiedLabel] = value ?? this._initialValue;
+      const newValue = value ?? this._initialValue;
+      if (!admitsFinite(this.name, newValue, this.nonFinite)) {
+        return;
+      }
+      this.value[stringifiedLabel] = newValue;
     } else {
       // A gauge starts at 0 by default, so the truthiness check here rejected
       // the very first `setValue` on almost every gauge - with a message that
@@ -327,7 +348,11 @@ export class Gauge<TLabel extends string = typeof DEFAULT_LABEL>
           ).join(", ")}.`,
         );
       }
-      this.value[DEFAULT_LABEL] = labelOrValue ?? this._initialValue;
+      const newValue = labelOrValue ?? this._initialValue;
+      if (!admitsFinite(this.name, newValue, this.nonFinite)) {
+        return;
+      }
+      this.value[DEFAULT_LABEL] = newValue;
     }
     this._lastUpdated = Date.now();
 

@@ -1,4 +1,5 @@
 import { CustomMetric } from "../interfaces/custom-metric.interface.js";
+import { admitsFinite } from "./finite-value.util.js";
 
 const DEFAULT_LABEL = "default" as const;
 
@@ -25,6 +26,12 @@ const DEFAULT_SAMPLE_SIZE = 2048;
 export class Summary<TLabel extends string = typeof DEFAULT_LABEL>
   implements CustomMetric<TLabel>
 {
+  /**
+   * Whether a non-finite observation has already been reported. An object so
+   * `admitsFinite` can set it, as with the counter's and gauge's latches.
+   */
+  private readonly nonFinite = { warned: false };
+
   /**
    * The name of the summary.
    * This should be a descriptive name that identifies the distribution.
@@ -187,11 +194,6 @@ export class Summary<TLabel extends string = typeof DEFAULT_LABEL>
    */
   observe(value: number, label: TLabel): void;
   observe(value: number, label?: TLabel): void {
-    if (typeof value !== "number" || !Number.isFinite(value)) {
-      throw new Error(
-        `Cannot observe a non-finite value on summary "${this.name}".`,
-      );
-    }
     if (this.labels && !label) {
       throw new Error(
         `Cannot observe on a summary with labels without specifying one. For example, use \`summary.observe(12, "${this.labels[0]}")\`.`,
@@ -203,6 +205,10 @@ export class Summary<TLabel extends string = typeof DEFAULT_LABEL>
           ", ",
         )}.`,
       );
+    }
+    // A NaN would poison every quantile read off the sample, and the total.
+    if (!admitsFinite(this.name, value, this.nonFinite)) {
+      return;
     }
 
     const key = label ?? DEFAULT_LABEL;
