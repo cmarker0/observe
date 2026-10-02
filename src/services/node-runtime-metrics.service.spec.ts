@@ -119,9 +119,10 @@ describe("NodeRuntimeMetricsService", () => {
       await sleep(300);
       const quiet = service.collectNodeRuntimeMetrics();
 
-      // The histogram has to tick once after the reset before it can measure
-      // anything; a stall that starts sooner is recorded in neither window.
-      await sleep(20);
+      // Started straight after that sample, before the histogram's next tick.
+      // A histogram reset between samples forgets its last tick too, and lost
+      // a stall that began there - one in the same timers pass as a
+      // collection - from both windows.
       block(200);
       await sleep(25);
       const stalled = service.collectNodeRuntimeMetrics();

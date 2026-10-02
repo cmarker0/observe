@@ -61,6 +61,16 @@ export class NodeRuntimeMetricsService
   private eventLoopDelayMonitor: ReturnType<
     typeof monitorEventLoopDelay
   > | null = null;
+  /**
+   * The histogram's sample count and running sum of delays (ns) as of the
+   * previous sample, so that each sample reports its own window. Differenced
+   * rather than reset: `reset()` also forgets when the histogram last ticked,
+   * so a stall that started before its next tick - one in the same timers pass
+   * as a collection, say - was recorded in neither window. A double holds the
+   * sum to within a few nanoseconds even after a year of uptime.
+   */
+  private lastDelayCount = 0;
+  private lastDelayTotal = 0;
   private gcObserver: PerformanceObserver | null = null;
   private gcCount = 0;
   private gcTotalDuration = 0;
@@ -117,6 +127,8 @@ export class NodeRuntimeMetricsService
     h.enable();
 
     this.eventLoopDelayMonitor = h;
+    this.lastDelayCount = 0;
+    this.lastDelayTotal = 0;
   }
 
   observeGcPerformance() {
@@ -191,13 +203,25 @@ export class NodeRuntimeMetricsService
       eventLoopUtilization,
       this.lastEventLoopUtilization,
     );
-    // `mean` is NaN until the histogram has recorded a sample since it was
-    // enabled or last reset, so a flush that lands immediately after startup -
-    // or right after the previous one - would otherwise ship NaN into a numeric
-    // column, where it survives, poisons every average built over it and makes
-    // the runtime alert comparisons undefined.
-    const meanDelay = this.eventLoopDelayMonitor.mean;
-    const lag = Number.isFinite(meanDelay) ? meanDelay / 1e6 : 0; // ns → ms
+    // The mean of this window's delays alone: left as the histogram's `mean`,
+    // it covers every delay since startup, and a long-running process flattens
+    // any burst of blocking into it. Each delay is a whole interval between two
+    // of the histogram's ticks, its 10ms resolution included, so an idle
+    // process reads about 10ms - what `monitorEventLoopDelay` reports, and so
+    // what the usual exporters report too.
+    const delayCount = this.eventLoopDelayMonitor.count;
+    // `mean` is NaN until the first sample, hence the guard.
+    const delayTotal =
+      delayCount > 0 ? this.eventLoopDelayMonitor.mean * delayCount : 0;
+    const windowCount = delayCount - this.lastDelayCount;
+    // A window without samples - a flush right after startup, or right after
+    // the previous one - reports 0. NaN would survive into a numeric column,
+    // poison every average built over it and make the runtime alert
+    // comparisons undefined.
+    const lag =
+      windowCount > 0
+        ? (delayTotal - this.lastDelayTotal) / windowCount / 1e6 // ns → ms
+        : 0;
 
     const metrics: NodeRuntimeMetrics = {
       memory: {
@@ -227,12 +251,8 @@ export class NodeRuntimeMetricsService
     };
 
     this.resetGcMetrics();
-    // Left alone, the histogram's `mean` covers every delay since startup, and
-    // a long-running process flattens any burst of blocking into it. Resetting
-    // also forgets when the histogram last ticked, so a stall that starts
-    // before its next tick - one in the same timers pass as this collection,
-    // say - is recorded in neither window.
-    this.eventLoopDelayMonitor.reset();
+    this.lastDelayCount = delayCount;
+    this.lastDelayTotal = delayTotal;
     this.lastEventLoopUtilization = eventLoopUtilization;
     this.updateLastCpuUsage(cpuUsage, timestamp);
 
