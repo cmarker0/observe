@@ -1,7 +1,7 @@
 ## PR Checklist
 Please check if your PR fulfills the following requirements:
 
-- [ ] The commit message follows our guidelines: https://github.com/nestjs/nest/blob/master/CONTRIBUTING.md
+- [ ] The commit messages follow the Angular convention, as commitlint checks them: https://github.com/nestjs/observe/blob/master/.commitlintrc.json
 - [ ] Tests for the changes have been added (for bug fixes / features)
 - [ ] Docs have been added / updated (for bug fixes / features)
 
@@ -21,9 +21,7 @@ What kind of change does this PR introduce?
 ```
 
 ## What is the current behavior?
-<!-- Please describe the current behavior that you are modifying, or link to a relevant issue. -->
-
-Issue Number: N/A
+<!-- Please describe the current behavior that you are modifying. -->
 
 
 ## What is the new behavior?

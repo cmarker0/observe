@@ -70,20 +70,20 @@ body:
       label: 'Package version'
       description: |
         Which version of `@nestjs/observe` are you using?
-        **Tip**: Make sure that all of yours `@nestjs/*` dependencies are in sync!
-      placeholder: '8.1.3'
+        **Tip**: Make sure that all of your `@nestjs/*` dependencies are in sync!
+      placeholder: '0.3.5'
 
   - type: input
     attributes:
       label: 'NestJS version'
       description: 'Which version of `@nestjs/core` are you using?'
-      placeholder: '8.1.3'
+      placeholder: '12.0.1'
 
   - type: input
     attributes:
       label: 'Node.js version'
       description: 'Which version of Node.js are you using?'
-      placeholder: '14.17.6'
+      placeholder: '22.12.0'
 
   - type: checkboxes
     attributes:
