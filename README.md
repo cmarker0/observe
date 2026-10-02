@@ -2,7 +2,7 @@
   <a href="https://observe.nestjs.com" target="_blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="NestJS Logo" /></a>
 </p>
 
-<p align="center">Auto-instrumented observability for <a href="https://nestjs.com" target="_blank">NestJS</a> applications — traces, errors, logs, jobs and profiles, with no manual span wiring.</p>
+<p align="center">Auto-instrumented observability for <a href="https://nestjs.com" target="_blank">NestJS</a> applications — traces, errors, logs, jobs and runtime metrics, with no manual span wiring.</p>
 
 <p align="center">
 <a href="https://www.npmjs.com/package/@nestjs/observe"><img src="https://img.shields.io/npm/v/@nestjs/observe.svg" alt="NPM Version" /></a>
@@ -33,7 +33,7 @@ Install it, set two environment variables, and the application starts reporting:
 - **Errors**, grouped by fingerprint, with the source frame and the trace that
   produced them.
 - **Logs**, correlated to the request that wrote them.
-- **Runtime and custom metrics**, plus on-demand **CPU profiles**.
+- **Runtime and custom metrics**.
 
 Telemetry is serialised on a detached worker thread and shipped from there, so
 the request path is untouched by the reporting.
