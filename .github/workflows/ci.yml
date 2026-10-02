@@ -136,12 +136,23 @@ jobs:
       # The package ships ESM but promises CommonJS consumers can require() it.
       # Nothing else in the suite would catch a stray top-level await, which
       # breaks that silently and only for CJS users.
+      #
+      # Run on the packed tarball and the newest Nest - what a consumer
+      # installs - as the step above runs it on the oldest, and silenced
+      # nowhere for the same reason. This used to install the workspace
+      # directory, which npm links rather than copies: the SDK then resolved
+      # its Nest from the workspace, not from what the step installed.
       - name: require(esm) from CommonJS
         run: |
+          set -euo pipefail
+          PACKED="$(mktemp -d)"
+          npm pack --ignore-scripts --pack-destination "$PACKED"
+          TARBALL="$(ls "$PACKED"/*.tgz)"
           cd "$(mktemp -d)"
-          npm init -y >/dev/null 2>&1
-          npm install --no-audit --no-fund "$GITHUB_WORKSPACE" reflect-metadata \
-            @nestjs/common@11 @nestjs/core@11 @nestjs/microservices@11 rxjs >/dev/null 2>&1
+          echo '{ "name": "require-esm", "private": true }' > package.json
+          npm install --no-audit --no-fund --loglevel=error "$TARBALL" \
+            reflect-metadata rxjs \
+            @nestjs/common@12 @nestjs/core@12 @nestjs/microservices@12
           node -r reflect-metadata -e '
             const o = require("@nestjs/observe");
             if (typeof o.createObserveModule !== "function") {
