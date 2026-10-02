@@ -1,4 +1,4 @@
-import { ConsoleLogger } from "@nestjs/common";
+import { ConsoleLogger, Logger } from "@nestjs/common";
 import { AsyncLocalStorage } from "async_hooks";
 import { ObserveAgentSharedBuffer } from "../agent/observe-agent.shared-buffer.js";
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/index.js";
@@ -290,6 +290,32 @@ describe("StdoutForwarderService", () => {
   });
 
   describe("patching stdout", () => {
+    it("says log lines are forwarded only when they are", () => {
+      const debugOf = (service: StdoutForwarderService) =>
+        vi
+          .spyOn((service as unknown as { logger: Logger }).logger, "debug")
+          .mockImplementation(() => {});
+
+      const idle = build({ debug: true });
+      const idleDebug = debugOf(idle);
+      idle.onModuleInit();
+
+      const forwarding = build({ debug: true, forwardLogs: true });
+      try {
+        const forwardingDebug = debugOf(forwarding);
+        forwarding.onModuleInit();
+
+        // It used to say forwarding was enabled under `debug` alone, so a
+        // service sending nothing told whoever was debugging it otherwise.
+        expect(idleDebug).not.toHaveBeenCalled();
+        expect(forwardingDebug).toHaveBeenCalledWith(
+          expect.stringContaining("Forwarding log lines"),
+        );
+      } finally {
+        forwarding.onModuleDestroy();
+      }
+    });
+
     it("forwards writes and leaves stdout working", () => {
       const service = build();
       const original = process.stdout.write;

@@ -89,8 +89,10 @@ export class StdoutForwarderService implements OnModuleInit, OnModuleDestroy {
   }
 
   onModuleInit() {
-    if (this.options.debug) {
-      this.logger.debug("Forwarding logs to stdout is enabled.");
+    if (this.options.debug && this.options.forwardLogs) {
+      this.logger.debug(
+        "Forwarding log lines written to stdout and stderr to Observe.",
+      );
     }
   }
 
