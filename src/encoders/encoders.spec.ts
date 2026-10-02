@@ -2,6 +2,7 @@ import { validateTelemetryPayload } from "../agent/telemetry-wire-contract.js";
 import { Counter } from "../custom-metrics/counter.js";
 import { Gauge } from "../custom-metrics/gauge.js";
 import { Summary } from "../custom-metrics/summary.js";
+import type { CustomMetric } from "../interfaces/index.js";
 import { CustomMetricsEncoder } from "./custom-metrics.encoder.js";
 import { JobSnapshotEncoder } from "./job-snapshot.encoder.js";
 import { remapKeys } from "./remap-keys.util.js";
@@ -139,6 +140,36 @@ describe("CustomMetricsEncoder", () => {
     >;
 
     expect(encoded.iv).toBeUndefined();
+  });
+
+  it("produces a payload the ingestion contract accepts", () => {
+    // One of each type, every reading filled in: a labelled counter with an
+    // increase, a gauge with a kind, and a summary's whole distribution.
+    const counter = new Counter("orders", "Orders placed", ["region"]);
+    counter.increment({ region: "eu" }, 3);
+    counter.markFlushed();
+    counter.increment({ region: "eu" }, 2);
+    const gauge = new Gauge("cpu", { kind: "peak" });
+    gauge.setValue(80);
+    const summary = new Summary("latency");
+    for (const value of [10, 20, 30]) {
+      summary.observe(value);
+    }
+
+    const errors = validateTelemetryPayload(
+      {
+        serviceId: "svc",
+        snapshots: [],
+        // Cast as `upsertCustomMetric` does: the encoder is typed for an
+        // unlabelled metric.
+        custom: [counter, gauge, summary].map((metric) =>
+          CustomMetricsEncoder.encode(metric as CustomMetric),
+        ),
+      },
+      { forbidUnknown: true },
+    );
+
+    expect(errors).toEqual([]);
   });
 });
 
@@ -577,13 +608,27 @@ describe("RuntimeMetricsEncoder", () => {
   });
 
   it("produces a payload the ingestion contract accepts", () => {
-    const encoded = RuntimeMetricsEncoder.encode(metrics());
+    // With a breakdown in it: the default sample's is null, which the contract
+    // reads as absent, and a contract that typed every kind as a number went
+    // unnoticed behind it.
+    const encoded = RuntimeMetricsEncoder.encode(
+      metrics({
+        gc: {
+          count: 4,
+          totalDuration: 20,
+          breakdown: {
+            minor: { count: 3, duration: 12 },
+            major: { count: 1, duration: 8 },
+            incremental: { count: 0, duration: 0 },
+          },
+        },
+      }),
+    );
 
-    const errors = validateTelemetryPayload({
-      serviceId: "svc",
-      snapshots: [],
-      runtime: encoded,
-    });
+    const errors = validateTelemetryPayload(
+      { serviceId: "svc", snapshots: [], runtime: encoded },
+      { forbidUnknown: true },
+    );
 
     expect(errors).toEqual([]);
   });

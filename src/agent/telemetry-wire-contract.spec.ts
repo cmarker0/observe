@@ -143,9 +143,48 @@ describe("sanitizeTelemetryEntry", () => {
     });
 
     it("requires a custom metric name", () => {
-      expect(sanitizeTelemetryEntry("custom", { t: "counter", v: 1 }).ok).toBe(
-        false,
-      );
+      const result = sanitizeTelemetryEntry("custom", {
+        t: "counter",
+        v: { default: 1 },
+      });
+
+      expect(result.ok).toBe(false);
+    });
+
+    it.each([
+      [
+        "a labelled counter",
+        () => ({
+          n: "orders",
+          t: "counter",
+          v: { '{"region":"eu"}': 5 },
+          l: ["region"],
+          iv: { '{"region":"eu"}': 2 },
+        }),
+      ],
+      [
+        "a summary",
+        () => ({
+          n: "latency",
+          t: "summary",
+          q50: { default: 20 },
+          q95: { default: 30 },
+          q99: { default: 30 },
+          ct: { default: 3 },
+          sm: { default: 60 },
+          mx: { default: 30 },
+        }),
+      ],
+    ])("keeps every per-label reading of %s", (_label, sample) => {
+      // Readings are maps from label to number, and `l` the label names.
+      // Declared as numbers and an object, a repaired batch sent each metric
+      // with nothing but its name.
+      const entry = sample();
+
+      const result = sanitizeTelemetryEntry("custom", entry);
+
+      expect(result).toEqual({ ok: true, problems: [] });
+      expect(entry).toEqual(sample());
     });
 
     it("drops a log entry with a non-finite timestamp", () => {
@@ -182,6 +221,28 @@ describe("sanitizeTelemetryEntry", () => {
 
       expect(result.ok).toBe(true);
       expect(entry).toEqual({ c: { u: 0.5, s: 0.1, p: 0.2 } });
+    });
+
+    it("keeps a runtime sample's GC breakdown", () => {
+      // Each kind is a count and a duration, not a number. Declared as one,
+      // every repaired batch lost its whole breakdown and blamed the kinds.
+      const sample = () => ({
+        g: {
+          c: 4,
+          td: 20,
+          b: {
+            m: { count: 3, duration: 12 },
+            j: { count: 1, duration: 8 },
+            i: { count: 0, duration: 0 },
+          },
+        },
+      });
+      const entry = sample();
+
+      const result = sanitizeTelemetryEntry("runtime", entry);
+
+      expect(result).toEqual({ ok: true, problems: [] });
+      expect(entry).toEqual(sample());
     });
   });
 

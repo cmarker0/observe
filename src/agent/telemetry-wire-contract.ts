@@ -108,6 +108,15 @@ const JOB_SNAPSHOT: Shape = {
   t: { type: "object", array: true, shape: TRACE_NODE },
 };
 
+/**
+ * One kind of collection in a runtime window. The encoder shortens the kind's
+ * key (`m`, `j`, `i`) but not these.
+ */
+const GC_COLLECTIONS: Shape = {
+  count: { type: "number" },
+  duration: { type: "number" },
+};
+
 const RUNTIME_METRICS: Shape = {
   c: {
     type: "object",
@@ -136,9 +145,9 @@ const RUNTIME_METRICS: Shape = {
       b: {
         type: "object",
         shape: {
-          m: { type: "number" },
-          j: { type: "number" },
-          i: { type: "number" },
+          m: { type: "object", shape: GC_COLLECTIONS },
+          j: { type: "object", shape: GC_COLLECTIONS },
+          i: { type: "object", shape: GC_COLLECTIONS },
         },
       },
     },
@@ -152,22 +161,27 @@ const RUNTIME_METRICS: Shape = {
   },
 };
 
+/**
+ * Every reading - `v`, `iv` and a summary's six distribution fields - is a map
+ * from label to number, keyed by whatever labels the application chose, so the
+ * contract declares the map rather than its entries. `l` is the label names.
+ */
 const CUSTOM_METRIC: Shape = {
   n: { type: "string", required: true },
   t: { type: "string" },
-  v: { type: "number" },
+  v: { type: "object" },
   tg: { type: "object" },
   d: { type: "string" },
-  l: { type: "object" },
+  l: { type: "string", array: true },
   lu: { type: "number" },
   k: { type: "string" },
-  iv: { type: "number" },
-  q50: { type: "number" },
-  q95: { type: "number" },
-  q99: { type: "number" },
-  ct: { type: "number" },
-  sm: { type: "number" },
-  mx: { type: "number" },
+  iv: { type: "object" },
+  q50: { type: "object" },
+  q95: { type: "object" },
+  q99: { type: "object" },
+  ct: { type: "object" },
+  sm: { type: "object" },
+  mx: { type: "object" },
 };
 
 const LOG_ENTRY: Shape = {
