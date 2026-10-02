@@ -93,6 +93,10 @@ jobs:
 
       - run: npm run lint
 
+      # The build compiles only what ships, and vitest strips types without
+      # checking them, so this is the one step that type-checks the specs.
+      - run: npm run typecheck
+
       - run: npm run build
 
       - run: npm test

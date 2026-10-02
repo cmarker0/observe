@@ -53,6 +53,7 @@
     "format": "prettier --write \"src/**/*.ts\"",
     "lint": "oxlint --type-aware src",
     "lint:fix": "oxlint --type-aware --fix src",
+    "typecheck": "tsc -p tsconfig.json --noEmit --incremental false",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",
