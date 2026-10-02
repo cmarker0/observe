@@ -1,3 +1,4 @@
+import { Logger } from "@nestjs/common";
 import { AsyncLocalStorage } from "async_hooks";
 import { HttpAdapterHost } from "@nestjs/core";
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/observe-options.interface.js";
@@ -15,6 +16,11 @@ describe("HttpObserveAgentService", () => {
 
   const createService = (
     http: ObserveModuleOptionsWithDefaults["http"] = {},
+    httpAdapter: object = {
+      setOnRequestHook: () => {},
+      setOnResponseHook: () => {},
+      setOnRouteTriggered: () => {},
+    },
   ) => {
     startedTraces = [];
     const registry = {
@@ -35,9 +41,7 @@ describe("HttpObserveAgentService", () => {
     } as unknown as OperationTraceRegistry;
 
     return new HttpObserveAgentService(
-      {
-        httpAdapter: { setOnRouteTriggered: () => {} },
-      } as unknown as HttpAdapterHost,
+      { httpAdapter } as unknown as HttpAdapterHost,
       new AsyncLocalStorage<Map<string, any>>(),
       {
         traceIdKey: "traceId",
@@ -56,6 +60,28 @@ describe("HttpObserveAgentService", () => {
       {},
       () => {},
     );
+
+  describe("an adapter without the request hooks", () => {
+    it("stands aside rather than stopping the application starting", () => {
+      // What every adapter before Nest 11.1.4 looks like - inside the
+      // supported peer range, and a boot-time throw used to be the result.
+      const warn = vi
+        .spyOn(Logger.prototype, "warn")
+        .mockImplementation(() => {});
+      try {
+        let service: HttpObserveAgentService<any> | undefined;
+        expect(() => {
+          service = createService({}, {});
+        }).not.toThrow();
+        expect(() => service!.registerHttpHooks()).not.toThrow();
+
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toContain("11.1.4");
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  });
 
   describe("queryParamsObfuscateRegex", () => {
     it("applies a non-global pattern instead of throwing", () => {

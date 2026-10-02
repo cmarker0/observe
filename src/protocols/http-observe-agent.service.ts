@@ -1,6 +1,7 @@
 import {
   Inject,
   Injectable,
+  Logger,
   OnModuleDestroy,
   OnModuleInit,
   RequestMethod,
@@ -29,10 +30,19 @@ import { uuidv7 } from "../utils/uuid-v7.util.js";
  */
 const ABORTED_TRACE_EVICTION_GRACE_MS = 30_000;
 
+/** The adapter hooks requests are traced through, all added in Nest 11.1.4. */
+const REQUEST_HOOKS = [
+  "setOnRequestHook",
+  "setOnResponseHook",
+  "setOnRouteTriggered",
+] as const;
+
 @Injectable()
 export class HttpObserveAgentService<Store extends Record<string, unknown>>
   implements OnModuleInit, OnModuleDestroy
 {
+  private readonly logger = new Logger(HttpObserveAgentService.name);
+  private warnedAboutHooks = false;
   private httpAdapterInitSubscription: Subscription | undefined;
 
   /**
@@ -62,13 +72,8 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
     // The "setOnRouteTriggered" hook must be set immediately
     // to ensure that route metadata is captured correctly.
     const { httpAdapter } = this.httpAdapterHost;
-    if (!httpAdapter) {
+    if (!httpAdapter || !this.hasRequestHooks(httpAdapter)) {
       return;
-    }
-    if (!("setOnRouteTriggered" in httpAdapter)) {
-      throw new Error(
-        "The HTTP adapter does not support the 'setOnRouteTriggered' method. Please ensure you are using the latest version of the NestJS HTTP adapter that supports this method.",
-      );
     }
 
     httpAdapter.setOnRouteTriggered(
@@ -106,7 +111,7 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
 
   registerHttpHooks() {
     const { httpAdapter } = this.httpAdapterHost;
-    if (!httpAdapter) {
+    if (!httpAdapter || !this.hasRequestHooks(httpAdapter)) {
       return;
     }
 
@@ -283,6 +288,29 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
       );
       timer.unref?.();
     });
+  }
+
+  /**
+   * Whether the adapter has the hooks requests are traced through, warning
+   * the first time it does not.
+   *
+   * A missing framework hook is a no-op, never an error. Nest added all three
+   * in 11.1.4, and this used to throw from the constructor when one was absent
+   * - so an application on an earlier 11.x, inside the supported range, did
+   * not start at all. Without the hooks there is no request to attach a trace
+   * to, so the HTTP side stands aside and everything else is still reported.
+   */
+  private hasRequestHooks(httpAdapter: object): boolean {
+    if (REQUEST_HOOKS.every((hook) => hook in httpAdapter)) {
+      return true;
+    }
+    if (!this.warnedAboutHooks) {
+      this.warnedAboutHooks = true;
+      this.logger.warn(
+        "HTTP requests will not be traced: this HTTP adapter has no request hooks, which Nest added in 11.1.4. Upgrade @nestjs/core and your @nestjs/platform-* package to trace them.",
+      );
+    }
+    return false;
   }
 
   private shouldIgnoreRequest(req: { url: string; method: string }): boolean {
