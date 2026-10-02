@@ -5,6 +5,9 @@ export interface CustomMetric<TLabel extends string = "default"> {
    * The name of the custom metric.
    * This should be a descriptive name that identifies the metric.
    * For example, "user_login_count" or "api_response_time".
+   *
+   * At most 100 characters reach the collector: a longer name is sent as its
+   * first 91 and a hash of the whole, with a warning.
    */
   name: string;
 
@@ -22,6 +25,7 @@ export interface CustomMetric<TLabel extends string = "default"> {
    * Description for the custom metric.
    * This can be used to provide additional context about what the metric represents.
    * For example, "Number of user logins in the last hour" or "Average response time for API requests".
+   * At most 255 characters are sent; a longer one is cut the same way as a name.
    */
   description?: string;
 
@@ -39,6 +43,7 @@ export interface CustomMetric<TLabel extends string = "default"> {
    * Optional labels for the custom metric.
    * Labels are key-value pairs that can be used to add additional context to the metric.
    * For example, you might use labels to indicate the environment (e.g., "production", "development") or the service (e.g., "user-service", "order-service").
+   * At most 1000 labels of at most 255 characters each are sent; a longer one is cut the same way as a name.
    */
   labels?: TLabel[];
 

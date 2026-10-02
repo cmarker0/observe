@@ -1,5 +1,77 @@
 import { CustomMetric } from "../interfaces/index.js";
+import { fitToLength } from "../utils/fit-to-length.util.js";
 import { remapKeys } from "./remap-keys.util.js";
+
+/**
+ * The longest name, description and label the collector accepts, and the most
+ * labels. It refuses the whole batch over a longer one rather than cutting it,
+ * so each is cut to fit here, on the way out - the metric itself keeps what
+ * the application gave it, which is what its own label checks compare
+ * against. A counter's and a gauge's series keys are bounded where they are
+ * made, by `admitsSeries`; a summary's are its labels, and cut with them.
+ */
+const MAX_NAME_LENGTH = 100;
+const MAX_DESCRIPTION_LENGTH = 255;
+const MAX_LABEL_LENGTH = 255;
+const MAX_LABELS = 1_000;
+
+/**
+ * Each metric's cut fields, so each is reported once rather than on every
+ * flush. Bounded: past it, cuts still happen, silently.
+ */
+const reported = new Set<string>();
+const MAX_REPORTED = 100;
+
+/** `value` cut to `maxLength`, reporting the first cut of this field for this metric. */
+function fit(
+  metricName: string,
+  field: string,
+  value: string,
+  maxLength: number,
+): string {
+  const sent = fitToLength(value, maxLength);
+  const key = `${field}\u0000${metricName}`;
+  if (sent !== value && !reported.has(key) && reported.size < MAX_REPORTED) {
+    reported.add(key);
+    console.warn(
+      `[observe] Custom metric "${metricName}" has a ${field} of ${value.length} characters, sent as "${sent}": ` +
+        `the collector takes at most ${maxLength} and refuses the whole batch over a longer one.`,
+    );
+  }
+  return sent;
+}
+
+/** At most `MAX_LABELS` labels, each cut to `MAX_LABEL_LENGTH`. */
+function fitLabels(metricName: string, labels: string[]): string[] {
+  if (
+    labels.length <= MAX_LABELS &&
+    labels.every((label) => label.length <= MAX_LABEL_LENGTH)
+  ) {
+    return labels;
+  }
+  return labels
+    .slice(0, MAX_LABELS)
+    .map((label) => fit(metricName, "label", label, MAX_LABEL_LENGTH));
+}
+
+/** A summary's map, its label keys cut as `fitLabels` cuts the labels. */
+function fitSummaryKeys(
+  metricName: string,
+  values: Record<string, number>,
+): Record<string, number> {
+  const keys = Object.keys(values);
+  if (
+    keys.length <= MAX_LABELS &&
+    keys.every((key) => key.length <= MAX_LABEL_LENGTH)
+  ) {
+    return values;
+  }
+  const fitted: Record<string, number> = {};
+  for (const key of keys.slice(0, MAX_LABELS)) {
+    fitted[fit(metricName, "label", key, MAX_LABEL_LENGTH)] = values[key];
+  }
+  return fitted;
+}
 
 const CUSTOM_METRICS_KEY_MAP = {
   name: "n",
@@ -75,9 +147,24 @@ export class CustomMetricsEncoder {
           // exist, but the pairing is not something the compiler can follow
           // through the indirection.
           (encoded as Record<string, unknown>)[CUSTOM_METRICS_KEY_MAP[key]] =
-            value;
+            fitSummaryKeys(metric.name, value);
         }
       }
+    }
+
+    if (typeof encoded.n === "string") {
+      encoded.n = fit(metric.name, "name", encoded.n, MAX_NAME_LENGTH);
+    }
+    if (typeof encoded.d === "string") {
+      encoded.d = fit(
+        metric.name,
+        "description",
+        encoded.d,
+        MAX_DESCRIPTION_LENGTH,
+      );
+    }
+    if (Array.isArray(encoded.l)) {
+      encoded.l = fitLabels(metric.name, encoded.l) as typeof encoded.l;
     }
 
     return encoded;

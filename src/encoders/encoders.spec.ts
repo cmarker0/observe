@@ -1,8 +1,10 @@
+import type { MockInstance } from "vitest";
 import { validateTelemetryPayload } from "../agent/telemetry-wire-contract.js";
 import { Counter } from "../custom-metrics/counter.js";
 import { Gauge } from "../custom-metrics/gauge.js";
 import { Summary } from "../custom-metrics/summary.js";
 import type { CustomMetric } from "../interfaces/index.js";
+import { fitToLength } from "../utils/fit-to-length.util.js";
 import { CustomMetricsEncoder } from "./custom-metrics.encoder.js";
 import { JobSnapshotEncoder } from "./job-snapshot.encoder.js";
 import { remapKeys } from "./remap-keys.util.js";
@@ -140,6 +142,78 @@ describe("CustomMetricsEncoder", () => {
     >;
 
     expect(encoded.iv).toBeUndefined();
+  });
+
+  describe("values longer than the collector accepts", () => {
+    // It refuses the whole batch over one, logs and spans included, so each
+    // is cut to fit on the way out.
+    let warn: MockInstance;
+
+    beforeEach(() => {
+      warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      warn.mockRestore();
+    });
+
+    it("cuts the name, keeping its head, and says so once", () => {
+      const name = `orders.${"placed.".repeat(20)}total`;
+      const counter = new Counter(name);
+      counter.increment();
+
+      const first = CustomMetricsEncoder.encode(counter) as Record<string, any>;
+      CustomMetricsEncoder.encode(counter);
+
+      expect(first.n).toBe(fitToLength(name, 100));
+      expect(first.n).toHaveLength(100);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain(
+        `name of ${name.length} characters`,
+      );
+    });
+
+    it("cuts the description", () => {
+      const gauge = new Gauge("queue.depth", { description: "d".repeat(300) });
+      gauge.setValue(1);
+
+      const encoded = CustomMetricsEncoder.encode(gauge) as Record<string, any>;
+
+      expect(encoded.d).toHaveLength(255);
+    });
+
+    it("cuts a label, and the summary keys made of it, the same way", () => {
+      const long = `tenant.${"x".repeat(300)}`;
+      const summary = new Summary<string>("checkout.duration", {
+        labels: [long, "short"],
+      });
+      summary.observe(10, long);
+      summary.observe(20, "short");
+
+      const encoded = CustomMetricsEncoder.encode(summary as never) as Record<
+        string,
+        any
+      >;
+
+      // Keyed by label on the wire, so the collector can still tell which
+      // distribution is which.
+      const sent = fitToLength(long, 255);
+      expect(encoded.l).toEqual([sent, "short"]);
+      expect(encoded.ct).toEqual({ [sent]: 1, short: 1 });
+      expect(encoded.mx).toEqual({ [sent]: 10, short: 20 });
+    });
+
+    it("sends at most the labels the collector accepts", () => {
+      const labels = Array.from({ length: 1001 }, (_, index) => `l${index}`);
+      const counter = new Counter("wide", "d", labels);
+
+      const encoded = CustomMetricsEncoder.encode(counter as never) as Record<
+        string,
+        any
+      >;
+
+      expect(encoded.l).toHaveLength(1000);
+    });
   });
 
   it("produces a payload the ingestion contract accepts", () => {

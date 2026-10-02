@@ -1,3 +1,4 @@
+import { Counter } from "../custom-metrics/counter.js";
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/observe-options.interface.js";
 import { ObserveAgentSharedBuffer } from "./observe-agent.shared-buffer.js";
 
@@ -329,6 +330,32 @@ describe("ObserveAgentSharedBuffer", () => {
       // The worker and the main thread share this buffer; two writers at once
       // would interleave bytes into an unparseable payload.
       expect(buffer.acquireLock()).toBe(false);
+    });
+  });
+
+  describe("custom metrics", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("keeps one entry for a metric whose name is cut to fit", () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const buffer = createBuffer();
+      const counter = new Counter(`orders.${"placed.".repeat(20)}total`);
+
+      counter.increment();
+      buffer.upsertCustomMetric(counter);
+      counter.increment();
+      buffer.upsertCustomMetric(counter);
+
+      // Matched against the name as sent, the second change updates the
+      // first entry instead of buffering the metric twice.
+      const { custom } = batchOf(buffer) as unknown as {
+        custom: Array<{ n: string; v: Record<string, number> }>;
+      };
+      expect(custom).toHaveLength(1);
+      expect(custom[0].n).toHaveLength(100);
+      expect(custom[0].v).toEqual({ default: 2 });
     });
   });
 });

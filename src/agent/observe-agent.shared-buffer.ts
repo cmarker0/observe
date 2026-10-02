@@ -423,18 +423,20 @@ export class ObserveAgentSharedBuffer {
       this._awaitingFlushAck.add(metric);
     }
 
+    // Matched on the name as sent, which the encoder cuts to what the
+    // collector accepts. Matched on the metric's own, a metric whose name is
+    // cut would be buffered again on every change.
+    const encoded = CustomMetricsEncoder.encode(metric as CustomMetric);
     const existingMetricIndex = this._mainThreadBuffer.custom.findIndex(
-      (m) => m.n === metric.name && m.t === metric.type,
+      (m) => m.n === encoded.n && m.t === encoded.t,
     );
     if (existingMetricIndex !== -1) {
       this._mainThreadBuffer.custom[existingMetricIndex] = {
         ...this._mainThreadBuffer.custom[existingMetricIndex],
-        ...CustomMetricsEncoder.encode(metric as CustomMetric),
+        ...encoded,
       };
     } else {
-      this._mainThreadBuffer.custom.push(
-        CustomMetricsEncoder.encode(metric as CustomMetric),
-      );
+      this._mainThreadBuffer.custom.push(encoded);
     }
   }
 
