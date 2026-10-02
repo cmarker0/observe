@@ -286,12 +286,14 @@ export interface ObserveOptions {
   /**
    * The sample rate for traces, which determines the percentage of traces that are sent to the Agent.
    * A value of 1.0 means all traces are sent, while a value of 0.1 means 10% of traces are sent.
+   * A value of 0 reads as unset, so it sends every trace rather than none - pass
+   * `() => false` to send none.
    * @default 1.0
    */
   tracesSampleRate?:
     | number
     | ((
-        protocal: "http" | "rpc" | "grpc" | "graphql" | "ws",
+        protocol: "http" | "rpc" | "grpc" | "graphql" | "ws",
         attributes: any,
       ) => boolean);
 
@@ -489,10 +491,12 @@ export interface ObserveOptions {
     tags?: Record<string, string>;
     /**
      * A function to generate additional attributes for RPC requests.
-     * This function receives the request context and should return an object containing key-value pairs.
+     * This function receives the transport and the message context - the
+     * transport's own subclass, such as `NatsContext` or `KafkaContext` - and
+     * should return an object containing key-value pairs.
      * These attributes can be retrieved later within the trace.
-     * @example (ctx) => ({ 'service': ctx.getService(), 'method': ctx.getMethod() })
-     * @default (ctx) => ({})
+     * @example (transportId, ctx) => (ctx instanceof NatsContext ? { subject: ctx.getSubject() } : {})
+     * @default (transportId, ctx) => ({})
      */
     setAttributes?: (
       transportId: Transport | symbol,
@@ -501,10 +505,10 @@ export interface ObserveOptions {
       [key: string]: string | number | boolean;
     };
     /**
-     * A function to associate a user identifier with the HTTP request.
-     * This function receives the request object and should return a string representing the user ID.
-     * If not provided, no user ID will be associated with the request.
-     * @example (transportId, ctx) => ctx.getMetadata().userId || 'anonymous'
+     * A function to associate a user identifier with the RPC message.
+     * This function receives the transport and the message context and should return a string representing the user ID.
+     * If not provided, no user ID will be associated with the message.
+     * @example (transportId, ctx) => (ctx instanceof NatsContext && ctx.getHeaders()?.get("user-id")) || 'anonymous'
      * @default undefined
      */
     getUserId?: (
@@ -590,19 +594,20 @@ export interface ObserveOptions {
     tags?: Record<string, string>;
     /**
      * A function to generate additional attributes for gRPC requests.
-     * This function receives the gRPC call object and should return an object containing key-value pairs.
+     * This function receives the gRPC call - its `request`, `metadata` and
+     * `operationId` - and should return an object containing key-value pairs.
      * These attributes can be retrieved later within the trace.
-     * @example (call) => ({ 'service': call.service, 'method': call.method })
+     * @example (call) => ({ operation: call.operationId })
      * @default (call) => ({})
      * */
     setAttributes?: (call: any) => {
       [key: string]: string | number | boolean;
     };
     /**
-     * A function to associate a user identifier with the HTTP request.
-     * This function receives the request object and should return a string representing the user ID.
-     * If not provided, no user ID will be associated with the request.
-     * @example (call) => call.metadata.userId || 'anonymous'
+     * A function to associate a user identifier with the gRPC call.
+     * This function receives the call and should return a string representing the user ID.
+     * If not provided, no user ID will be associated with the call.
+     * @example (call) => String(call.metadata.get('user-id')[0] ?? 'anonymous')
      * @default undefined
      */
     getUserId?: (call: any) => string;
