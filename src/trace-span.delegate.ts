@@ -1,17 +1,38 @@
+import type { SpanTagSink } from "./recorder/span-recorder.js";
+
 export class TraceSpanDelegate {
+  private readonly sink: SpanTagSink;
+
   get id(): string {
-    return this._id;
+    return this.sink.id;
   }
 
   get name(): string | undefined {
-    return this._name;
+    return this.sink.name;
   }
 
+  constructor(sink: SpanTagSink);
   constructor(
-    private readonly _id: string,
-    private readonly _name: string | undefined,
-    private readonly _tags: Record<string, string | number | boolean>,
-  ) {}
+    id: string,
+    name: string | undefined,
+    tags: Record<string, string | number | boolean>,
+  );
+  constructor(
+    idOrSink: string | SpanTagSink,
+    name?: string,
+    tags?: Record<string, string | number | boolean>,
+  ) {
+    if (typeof idOrSink !== "string") {
+      this.sink = idOrSink;
+      return;
+    }
+    const target = tags ?? {};
+    this.sink = {
+      id: idOrSink,
+      name,
+      setTags: (update) => Object.assign(target, update),
+    };
+  }
 
   /**
    * Sets a tag on the trace span.
@@ -20,7 +41,7 @@ export class TraceSpanDelegate {
    * @returns The current instance of the TraceSpanDelegate for method chaining.
    */
   setTag(key: string, value: string | number | boolean): TraceSpanDelegate {
-    this._tags[key] = value;
+    this.sink.setTags({ [key]: value });
     return this;
   }
 
@@ -30,7 +51,12 @@ export class TraceSpanDelegate {
    * @returns The current instance of the TraceSpanDelegate for method chaining.
    */
   addTags(tags: Record<string, string | number | boolean>): TraceSpanDelegate {
-    Object.assign(this._tags, tags);
+    this.sink.setTags(tags);
     return this;
+  }
+
+  /** @internal - what a recorder hands on in place of the delegate. */
+  asSink(): SpanTagSink {
+    return this.sink;
   }
 }

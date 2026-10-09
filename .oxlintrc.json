@@ -1,10 +1,6 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": [
-    "typescript",
-    "unicorn",
-    "oxc"
-  ],
+  "plugins": ["typescript", "unicorn", "oxc"],
   "categories": {
     "correctness": "error",
     "suspicious": "warn",
@@ -14,11 +10,7 @@
     "node": true,
     "es2023": true
   },
-  "ignorePatterns": [
-    "dist",
-    "coverage",
-    "**/*.d.ts"
-  ],
+  "ignorePatterns": ["dist", "coverage", "**/*.d.ts"],
   "rules": {
     "typescript/no-explicit-any": "off",
     "typescript/no-non-null-assertion": "off",
@@ -45,19 +37,35 @@
   },
   "overrides": [
     {
-      "files": [
-        "**/*.spec.ts",
-        "**/*.int-spec.ts",
-        "src/testing/**"
-      ],
+      "files": ["**/*.spec.ts", "**/*.int-spec.ts", "src/testing/**"],
       "rules": {
         "typescript/no-empty-function": "off",
         "unicorn/consistent-function-scoping": "off"
       }
     },
     {
+      "files": ["src/agent/detached-observe-worker.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["*"],
+                "allowTypeImports": true,
+                "message": "This file is stringified and eval'd as a worker: value imports do not exist at runtime. Pass data via workerData, code as a stringified argument."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
       "files": [
-        "src/agent/detached-observe-worker.ts"
+        "src/protocols/*.service.ts",
+        "src/protocols/job-trace-runner.ts",
+        "src/instrument/*.instrument.ts",
+        "src/outgoing/*.ts"
       ],
       "rules": {
         "no-restricted-imports": [
@@ -66,10 +74,11 @@
             "patterns": [
               {
                 "group": [
-                  "*"
+                  "**/operation-trace.registry.js",
+                  "**/observe-agent.shared-buffer.js",
+                  "**/trace-sampler.service.js"
                 ],
-                "allowTypeImports": true,
-                "message": "This file is stringified and eval'd as a worker: value imports do not exist at runtime. Pass data via workerData, code as a stringified argument."
+                "message": "Record spans through SpanRecorder (src/recorder/span-recorder.ts), so a different backend can sit behind it."
               }
             ]
           }

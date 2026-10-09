@@ -1,6 +1,7 @@
 import { Logger } from "@nestjs/common";
 import { ProcessorDecoratorService } from "@nestjs/bullmq";
 import { AsyncLocalStorage } from "async_hooks";
+import { RegistrySpanRecorder } from "../recorder/registry-span-recorder.js";
 import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
 import { QueueObserveAgentService } from "./queue-observe-agent.service.js";
 
@@ -11,7 +12,6 @@ const originalDecorate = prototype.decorate;
 
 const createAgent = () =>
   new QueueObserveAgentService(
-    {} as never,
     { traceIdKey: "traceId" } as never,
     {} as never,
     new AsyncLocalStorage<Map<string, any>>(),
@@ -20,10 +20,15 @@ const createAgent = () =>
 /** An agent whose runner can open and close a trace for real. */
 const createTracingAgent = () => {
   const als = new AsyncLocalStorage<Map<string, any>>();
-  return new QueueObserveAgentService(
-    { insertJobSnapshot: vi.fn() } as never,
-    { traceIdKey: "traceId" } as never,
+  const recorder = new RegistrySpanRecorder(
+    als,
     new OperationTraceRegistry(als as never, false),
+    "traceId",
+  );
+  recorder.attach({ insertJobSnapshot: vi.fn() } as never);
+  return new QueueObserveAgentService(
+    { traceIdKey: "traceId" } as never,
+    recorder,
     als,
   );
 };

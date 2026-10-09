@@ -17,8 +17,6 @@ describe("RpcObserveAgentService", () => {
       options,
       { getRpcTargetRegistry: () => ({ subscribe }) } as never,
       {} as never,
-      {} as never,
-      {} as never,
     );
 
   afterEach(() => {
@@ -95,12 +93,17 @@ describe("RpcObserveAgentService", () => {
           }),
         } as never,
         {
-          startTrace: vi.fn(),
-          endTrace: vi.fn(),
-          pluckSnapshot: vi.fn(),
+          runOperation: (
+            start: { record?: boolean },
+            fn: (operation: unknown) => unknown,
+          ) =>
+            fn(
+              start.record !== false && (overrides.capture ?? true)
+                ? { end: vi.fn() }
+                : undefined,
+            ),
+          currentOperation: () => undefined,
         } as never,
-        {} as never,
-        { shouldCapture: () => overrides.capture ?? true } as never,
       );
       agent.onModuleInit();
       return agent;

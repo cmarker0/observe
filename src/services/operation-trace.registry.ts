@@ -1,4 +1,4 @@
-import { IntrinsicException, Logger, RequestMethod } from "@nestjs/common";
+import { IntrinsicException, Logger } from "@nestjs/common";
 import { AsyncLocalStorage } from "async_hooks";
 import { activeSliceRecorder } from "../profiling/span-slice-recorder.js";
 import { uuidv7 } from "../utils/uuid-v7.util.js";
@@ -574,11 +574,7 @@ export class OperationTraceRegistry {
     }
   }
 
-  addRouteMetadataToTrace(
-    requestId: string,
-    requestMethod: RequestMethod,
-    path: string,
-  ): void {
+  addRouteMetadataToTrace(requestId: string, path: string): void {
     const snapshot = this.traceSnapshots.get(requestId) as RequestSnapshot;
     if (!snapshot) {
       return;

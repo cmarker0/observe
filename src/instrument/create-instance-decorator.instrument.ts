@@ -1,10 +1,4 @@
-import { AsyncLocalStorage } from "async_hooks";
-import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
-import { KeyOf } from "../types/key-of.type.js";
-import {
-  CALLER_METADATA_KEY,
-  TRACE_REGISTRY_KEY,
-} from "../observe.constants.js";
+import type { SpanRecorder } from "../recorder/span-recorder.js";
 
 /**
  * Stand-in "class name" for instrumented standalone functions. Unlike methods,
@@ -22,7 +16,6 @@ interface TracedCallSpec {
    */
   className: string;
   methodName: string;
-  spanId: string;
 
   /**
    * Re-entrancy guard. While a call is being traced, nested calls to the very
@@ -39,16 +32,9 @@ interface TracedCallSpec {
   callUntraced: (thisArg: unknown, args: unknown[]) => unknown;
 }
 
-export function createInstanceDecorator<T extends Record<string, unknown>>(
-  als: AsyncLocalStorage<Map<KeyOf<T>, any>>,
-  operationTraceRegistry: OperationTraceRegistry,
+export function createInstanceDecorator(
+  spanRecorder: SpanRecorder,
   options: {
-    /**
-     * The trace ID key used to identify the trace in the context.
-     * This key is used to store the trace ID in the context for later retrieval.
-     */
-    traceIdKey: string;
-
     /**
      * A function to determine whether to skip instrumentation for a given instance.
      * This function should return true if the instance should not be instrumented.
@@ -64,14 +50,22 @@ export function createInstanceDecorator<T extends Record<string, unknown>>(
    * user actually made instead of `Proxy.proxyFn`.
    */
   const createTracedWrapper = (spec: TracedCallSpec) => {
-    const { className, methodName, spanId } = spec;
+    const { className, methodName } = spec;
     const frameName = `${className}.${methodName}`;
+    const stepName = { className, methodKey: methodName };
 
     // Pulled out of `spec` so they are invoked as plain functions: calling them
     // as `spec.call(...)` would make `spec` the frame's receiver and print
     // "Object.<name>".
     const call = spec.call;
     const callUntraced = spec.callUntraced;
+
+    // Before the recorder records the step: it copies `err.stack` into the
+    // span payload (and, on a root span, into the snapshot that becomes the
+    // error group's sample), so relabelling afterwards would leave that copy
+    // carrying this frame's `Proxy.`.
+    const relabel = (err: unknown) =>
+      relabelProxyFrame(err, className, methodName);
 
     // A function expression, not an arrow: the wrapper has to forward whatever
     // `this` the caller invoked it with. Nested arrows below inherit it.
@@ -81,80 +75,23 @@ export function createInstanceDecorator<T extends Record<string, unknown>>(
         return callUntraced(this, args);
       }
 
-      const store = als.getStore();
-      const requestId =
-        store?.get(TRACE_REGISTRY_KEY) ?? store?.get(options.traceIdKey);
-      if (!requestId) {
-        return callUntraced(this, args);
-      }
-      spec.setActive(true);
-
-      const callerId = store?.get(CALLER_METADATA_KEY) as string | undefined;
-      const newStepId = operationTraceRegistry.internalStartTraceStep(
-        requestId,
-        className,
-        methodName,
-        callerId,
-      );
-
-      // No step means the registry holds no snapshot for this trace id: the
-      // request was dropped by `http.ignore` or sampled out, but its store
-      // still carries the id - log correlation needs it there. Nothing was
-      // opened, so nothing must be closed; without this bail-out every
-      // provider call on an ignored route logged a registry error.
-      if (newStepId === undefined) {
-        try {
-          return callUntraced(this, args);
-        } finally {
-          spec.setActive(false);
-        }
-      }
-
-      const onReturnValue = (res: unknown) => {
-        operationTraceRegistry.internalEndTraceStep(
-          requestId,
-          spanId,
-          className,
-          methodName,
-          newStepId,
-        );
-        return res;
-      };
-      const onError = (err: any) => {
-        // Before the registry records the step: `internalEndTraceStep` copies
-        // `err.stack` into the span payload (and, on a root span, into the
-        // snapshot that becomes the error group's sample), so relabelling
-        // afterwards would leave that copy carrying this frame's `Proxy.`.
-        relabelProxyFrame(err, className, methodName);
-        operationTraceRegistry.internalEndTraceStep(
-          requestId,
-          spanId,
-          className,
-          methodName,
-          newStepId,
-          err,
-        );
-        // Re-throw the error to maintain original behavior
-        throw err;
-      };
-      return als.run(
-        new Map([
-          ...(store?.entries() ?? []),
-          [CALLER_METADATA_KEY, newStepId],
-        ]),
-        named(frameName, () => {
+      return spanRecorder.runStep(
+        stepName,
+        named(frameName, (traced: boolean) => {
+          // Nothing to record into - no operation, or one that is ignored or
+          // sampled out. Its store may still carry the trace id: log
+          // correlation needs it there.
+          if (!traced) {
+            return callUntraced(this, args);
+          }
+          spec.setActive(true);
           try {
-            const result = call(this, args);
-            if (result instanceof Promise) {
-              return result.then(onReturnValue).catch(onError);
-            }
-            return onReturnValue(result);
-          } catch (err) {
-            onError(err);
+            return call(this, args);
           } finally {
             spec.setActive(false);
           }
         }),
+        relabel,
       );
     });
   };
@@ -180,7 +117,6 @@ export function createInstanceDecorator<T extends Record<string, unknown>>(
     const tracedFn = createTracedWrapper({
       className,
       methodName,
-      spanId: `${className}#${methodName}`,
       isActive: () => active,
       setActive: (value) => (active = value),
       call: invoke,
@@ -287,7 +223,6 @@ export function createInstanceDecorator<T extends Record<string, unknown>>(
         const proxyFn = createTracedWrapper({
           className,
           methodName,
-          spanId: generateSpanId(target, methodName),
           isActive: () =>
             currentlyTracing.get(target)?.has(methodName) ?? false,
           setActive: (active) => {
@@ -564,8 +499,4 @@ function declaresPrivateMembers(ctor: Function): boolean {
     // natives) cannot be a class body with private members.
     return false;
   }
-}
-
-function generateSpanId(instance: object, methodKey: string): string {
-  return `${instance.constructor.name}#${methodKey}`;
 }

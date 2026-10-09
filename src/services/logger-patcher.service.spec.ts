@@ -2,6 +2,7 @@ import { ConsoleLogger } from "@nestjs/common";
 import { AsyncLocalStorage } from "async_hooks";
 import { ObserveAgentSharedBuffer } from "../agent/observe-agent.shared-buffer.js";
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/index.js";
+import { SpanRecorder } from "../recorder/span-recorder.js";
 import { LoggerPatcherService } from "./logger-patcher.service.js";
 import { StdoutForwarderService } from "./stdout-forwarder.service.js";
 
@@ -113,6 +114,7 @@ describe("LoggerPatcherService", () => {
         // A separate, empty store: the id has to come off the line itself, as
         // it does when the async context has moved on by the time of the write.
         new AsyncLocalStorage(),
+        { currentSpanId: () => undefined } as unknown as SpanRecorder,
       );
 
       const output = captureStdout(() =>

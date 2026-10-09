@@ -1,13 +1,12 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
 import { AsyncLocalStorage } from "async_hooks";
 import { uuidv7 } from "../utils/uuid-v7.util.js";
-import { ObserveAgentSharedBuffer } from "../agent/observe-agent.shared-buffer.js";
 import {
   JobSnapshot,
   ObserveModuleOptionsWithDefaults,
 } from "../interfaces/index.js";
 import { OBSERVE_OPTIONS } from "../observe.constants.js";
-import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
+import { SpanRecorder } from "../recorder/span-recorder.js";
 import { KeyOf } from "../types/key-of.type.js";
 import {
   describePeerLoadError,
@@ -77,16 +76,14 @@ export class ScheduleObserveAgentService<
   private readonly runner: JobTraceRunner<Store>;
 
   constructor(
-    observeAgentSharedBuffer: ObserveAgentSharedBuffer,
     @Inject(OBSERVE_OPTIONS)
     options: ObserveModuleOptionsWithDefaults,
-    operationTraceRegistry: OperationTraceRegistry,
+    spanRecorder: SpanRecorder,
     asyncLocalStorage: AsyncLocalStorage<Map<KeyOf<Store>, any>>,
   ) {
     this.runner = new JobTraceRunner(
-      observeAgentSharedBuffer,
       options,
-      operationTraceRegistry,
+      spanRecorder,
       asyncLocalStorage,
       this.logger,
     );

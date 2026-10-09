@@ -2,9 +2,9 @@
 
 Spike output for the plan in `plan.md` (phases 0–5). Covers how the
 registry and the agents fit together, the behavioural baseline, corrections to
-the plan, and the `SpanRecorder` seam
-(`src/recorder/span-recorder.interface.ts`, a sketch that nothing implements
-or consumes yet).
+the plan, and the `SpanRecorder` seam. Phase 1 has since implemented the
+seam (`src/recorder/span-recorder.ts`); see `phase-1-notes.md` for where it
+differs from the sketch this doc describes.
 
 ## Baseline
 

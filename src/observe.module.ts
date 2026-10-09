@@ -38,6 +38,8 @@ import { LoggerPatcherService } from "./services/logger-patcher.service.js";
 import { NodeRuntimeMetricsService } from "./services/node-runtime-metrics.service.js";
 import { resolveSpanCollapseSettings } from "./services/collapse-repeated-spans.util.js";
 import { OperationTraceRegistry } from "./services/operation-trace.registry.js";
+import { RegistrySpanRecorder } from "./recorder/registry-span-recorder.js";
+import { SpanRecorder } from "./recorder/span-recorder.js";
 import { resolveSkipSpans } from "./services/skip-spans.util.js";
 import { StdoutForwarderService } from "./services/stdout-forwarder.service.js";
 import { TraceSamplerService } from "./services/trace-sampler.service.js";
@@ -139,6 +141,13 @@ export function createObserveModule<Store extends Record<string, unknown>>(
     >,
     options.sourceContext,
   );
+  // Built here for the same reason as the registry: the instrumentation hook
+  // needs it before the DI container exists.
+  const spanRecorder = new RegistrySpanRecorder(
+    asyncLocalStorage,
+    operationTraceRegistry,
+    options.traceIdKey,
+  );
 
   @Module({
     imports: [DiscoveryModule],
@@ -175,6 +184,24 @@ export function createObserveModule<Store extends Record<string, unknown>>(
           return operationTraceRegistry;
         },
         inject: [{ token: OBSERVE_OPTIONS, optional: true }],
+      },
+      {
+        provide: SpanRecorder,
+        // Handed what it ships through and samples with once they exist. The
+        // registry is injected only so it is configured first.
+        useFactory: (
+          _registry: OperationTraceRegistry,
+          buffer: ObserveAgentSharedBuffer,
+          sampler: TraceSamplerService,
+        ) => {
+          spanRecorder.attach(buffer, sampler);
+          return spanRecorder;
+        },
+        inject: [
+          OperationTraceRegistry,
+          ObserveAgentSharedBuffer,
+          TraceSamplerService,
+        ],
       },
       TracerService,
       LoggerPatcherService,
@@ -309,8 +336,11 @@ export function createObserveModule<Store extends Record<string, unknown>>(
         // inspection throws before the structural checks below ever touch
         // them.
         options.skipInstrumentation!(instance) ||
-        [asyncLocalStorage, operationTraceRegistry].includes(
-          instance as AsyncLocalStorage<any> | OperationTraceRegistry,
+        [asyncLocalStorage, operationTraceRegistry, spanRecorder].includes(
+          instance as
+            | AsyncLocalStorage<any>
+            | OperationTraceRegistry
+            | RegistrySpanRecorder,
         ) ||
         instance instanceof TraceSamplerService ||
         instance instanceof TracerService ||
@@ -362,14 +392,9 @@ export function createObserveModule<Store extends Record<string, unknown>>(
       // this in a safety net that falls back to the undecorated instance,
       // with a warning, should it ever throw.
       instanceDecorator: (() => {
-        const decorate = createInstanceDecorator<Store>(
-          asyncLocalStorage,
-          operationTraceRegistry,
-          {
-            traceIdKey: options.traceIdKey,
-            skipInstrumentation,
-          },
-        );
+        const decorate = createInstanceDecorator(spanRecorder, {
+          skipInstrumentation,
+        });
         return (instance: unknown) => {
           propagateTraceIdThrough(instance, () =>
             asyncLocalStorage.getStore()?.get(options.traceIdKey as never),
