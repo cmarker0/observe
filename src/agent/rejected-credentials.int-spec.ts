@@ -27,10 +27,10 @@ let output: CapturedOutput;
 @Module({
   imports: [
     ObserveModule.forRoot({
-      // Exactly what `nest new --observe` scaffolds before the user pastes
-      // their own credentials in.
-      appKey: "YOUR_APP_KEY",
-      appSecret: "YOUR_APP_SECRET",
+      // A revoked or mistyped pair. Not the `nest new` placeholders: those are
+      // never sent at all (see scaffold-credentials.int-spec.ts).
+      appKey: "revoked-app-key",
+      appSecret: "revoked-app-secret",
       serviceId: "unauthenticated-app",
       endpoint: COLLECTOR_URL,
       // The agent's floor; anything lower is clamped to this with a warning.
