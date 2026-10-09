@@ -56,6 +56,15 @@ export interface RedactionOptions {
   useDefaultPatterns?: boolean;
 }
 
+/**
+ * Where OpenTelemetry tracers come from - a `TracerProvider`. Structural, so
+ * this type does not reach for `@opentelemetry/api` in applications that never
+ * install it.
+ */
+export interface TracerSource {
+  getTracer(name: string, version?: string): unknown;
+}
+
 export interface CreateObserveModuleOptions {
   /**
    * The trace ID key used to identify the trace in the context.
@@ -144,6 +153,31 @@ export interface CreateObserveModuleOptions {
          * @default false
          */
         sourceMaps?: boolean;
+      };
+
+  /**
+   * Records spans through the OpenTelemetry API instead of shipping trace
+   * snapshots to the Observe collector. Requires `@opentelemetry/api`.
+   *
+   * The application owns the SDK: register a tracer provider (and with it a
+   * context manager, exporter and resource) before the Nest application is
+   * created. Spans then go wherever that provider exports them; metrics and
+   * forwarded logs still go to the collector.
+   *
+   * Operations become SERVER spans (CONSUMER for jobs and message
+   * transports), instrumented providers INTERNAL spans named `Class.method`.
+   * `tracesSampleRate` and the `ignore` hooks decide before the operation's
+   * span exists; a parent-based sampler - the SDK default - carries that
+   * decision to every span beneath it. `skipSpans`, `spanCollapse` and
+   * `sourceContext` apply to snapshots only and are ignored here.
+   *
+   * Pass `{ tracerProvider }` to use a provider other than the global one.
+   * @default false
+   */
+  opentelemetry?:
+    | boolean
+    | {
+        tracerProvider?: TracerSource;
       };
 }
 

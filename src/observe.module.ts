@@ -38,6 +38,10 @@ import { LoggerPatcherService } from "./services/logger-patcher.service.js";
 import { NodeRuntimeMetricsService } from "./services/node-runtime-metrics.service.js";
 import { resolveSpanCollapseSettings } from "./services/collapse-repeated-spans.util.js";
 import { OperationTraceRegistry } from "./services/operation-trace.registry.js";
+import {
+  OpenTelemetryApi,
+  OtelSpanRecorder,
+} from "./recorder/otel-span-recorder.js";
 import { RegistrySpanRecorder } from "./recorder/registry-span-recorder.js";
 import { SpanRecorder } from "./recorder/span-recorder.js";
 import { resolveSkipSpans } from "./services/skip-spans.util.js";
@@ -54,6 +58,10 @@ import {
 import { fitToLength } from "./utils/fit-to-length.util.js";
 import { inferServiceVersion } from "./utils/infer-service-version.util.js";
 import { LogRedactor } from "./utils/log-redactor.js";
+import {
+  describePeerLoadError,
+  loadOptionalPeer,
+} from "./utils/optional-peer.util.js";
 
 /**
  * All three async providers are optional on the options type, but one of them
@@ -121,6 +129,25 @@ function withServiceVersion<
   return inferred ? { ...options, serviceVersion: inferred.version } : options;
 }
 
+/**
+ * `@opentelemetry/api`, loaded only when `opentelemetry` is switched on so
+ * every other application can leave the peer out.
+ */
+function loadOpenTelemetryApi(): OpenTelemetryApi {
+  const loaded = loadOptionalPeer<OpenTelemetryApi>("@opentelemetry/api");
+  if (!loaded.installed) {
+    throw new Error(
+      'createObserveModule({ opentelemetry }) requires "@opentelemetry/api". Install it alongside your OpenTelemetry SDK.',
+    );
+  }
+  if (!loaded.module) {
+    throw new Error(
+      `"@opentelemetry/api" is installed but could not be loaded: ${describePeerLoadError(loaded.error)}`,
+    );
+  }
+  return loaded.module;
+}
+
 export function createObserveModule<Store extends Record<string, unknown>>(
   options: CreateObserveModuleOptions = {},
 ) {
@@ -143,11 +170,20 @@ export function createObserveModule<Store extends Record<string, unknown>>(
   );
   // Built here for the same reason as the registry: the instrumentation hook
   // needs it before the DI container exists.
-  const spanRecorder = new RegistrySpanRecorder(
-    asyncLocalStorage,
-    operationTraceRegistry,
-    options.traceIdKey,
-  );
+  const spanRecorder: RegistrySpanRecorder | OtelSpanRecorder =
+    options.opentelemetry
+      ? new OtelSpanRecorder(
+          asyncLocalStorage,
+          loadOpenTelemetryApi(),
+          typeof options.opentelemetry === "object"
+            ? options.opentelemetry.tracerProvider
+            : undefined,
+        )
+      : new RegistrySpanRecorder(
+          asyncLocalStorage,
+          operationTraceRegistry,
+          options.traceIdKey,
+        );
 
   @Module({
     imports: [DiscoveryModule],
@@ -188,13 +224,18 @@ export function createObserveModule<Store extends Record<string, unknown>>(
       {
         provide: SpanRecorder,
         // Handed what it ships through and samples with once they exist. The
-        // registry is injected only so it is configured first.
+        // registry is injected so it is configured first; the OTel recorder
+        // takes its redactor, so error events are redacted by the same rules.
         useFactory: (
-          _registry: OperationTraceRegistry,
+          registry: OperationTraceRegistry,
           buffer: ObserveAgentSharedBuffer,
           sampler: TraceSamplerService,
         ) => {
-          spanRecorder.attach(buffer, sampler);
+          if (spanRecorder instanceof OtelSpanRecorder) {
+            spanRecorder.attach(registry.getRedactor(), sampler);
+          } else {
+            spanRecorder.attach(buffer, sampler);
+          }
           return spanRecorder;
         },
         inject: [
