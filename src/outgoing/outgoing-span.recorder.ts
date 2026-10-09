@@ -1,11 +1,5 @@
 import { AsyncLocalStorage } from "async_hooks";
-import {
-  CALLER_METADATA_KEY,
-  TRACE_REGISTRY_KEY,
-} from "../observe.constants.js";
-import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
-
-type Tags = Record<string, string | number | boolean>;
+import type { SpanRecorder, Tags } from "../recorder/span-recorder.js";
 
 /** A span that has been opened and is waiting to be told how the call went. */
 export interface OpenOutgoingSpan {
@@ -34,11 +28,7 @@ export class OutgoingSpanRecorder {
    */
   private readonly covered = new AsyncLocalStorage<true>();
 
-  constructor(
-    private readonly operationTraceRegistry: OperationTraceRegistry,
-    private readonly asyncLocalStorage: AsyncLocalStorage<Map<any, any>>,
-    private readonly traceIdKey: string,
-  ) {}
+  constructor(private readonly spanRecorder: SpanRecorder) {}
 
   /**
    * Opens a span, or returns `undefined` when there is nothing to attach it
@@ -53,47 +43,7 @@ export class OutgoingSpanRecorder {
     if (this.covered.getStore()) {
       return undefined;
     }
-    const store = this.asyncLocalStorage.getStore();
-    const registryKey =
-      store?.get(TRACE_REGISTRY_KEY) ?? store?.get(this.traceIdKey);
-    if (typeof registryKey !== "string") {
-      return undefined;
-    }
-    const callerId = store?.get(CALLER_METADATA_KEY) as string | undefined;
-    const spanId = this.operationTraceRegistry.internalStartTraceStep(
-      registryKey,
-      className,
-      methodKey,
-      callerId,
-    );
-    if (spanId === undefined) {
-      return undefined;
-    }
-    const node = this.operationTraceRegistry.getActiveSpan(registryKey, spanId);
-    if (node) {
-      node.tags = { ...node.tags, ...tags };
-    }
-
-    let ended = false;
-    return {
-      end: (error?: unknown) => {
-        // A driver may report one call twice - a callback and an `error`
-        // event, a settled promise and a late listener. The registry counts
-        // closes against opens, so the second would unbalance the snapshot.
-        if (ended) {
-          return;
-        }
-        ended = true;
-        this.operationTraceRegistry.internalEndTraceStep(
-          registryKey,
-          spanId,
-          className,
-          methodKey,
-          spanId,
-          error === undefined || error === null ? undefined : (error as Error),
-        );
-      },
-    };
+    return this.spanRecorder.openStep({ className, methodKey }, tags);
   }
 
   /** Runs `fn` with nested entry points told the call is already covered. */

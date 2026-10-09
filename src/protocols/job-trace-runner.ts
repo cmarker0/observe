@@ -1,16 +1,12 @@
 import { Logger } from "@nestjs/common";
 import { AsyncLocalStorage } from "async_hooks";
-import { ObserveAgentSharedBuffer } from "../agent/observe-agent.shared-buffer.js";
 import {
   JobContext,
   JobSnapshot,
   ObserveModuleOptionsWithDefaults,
 } from "../interfaces/index.js";
-import {
-  JOB_TRACE_OPTION_KEY,
-  TRACE_REGISTRY_KEY,
-} from "../observe.constants.js";
-import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
+import { JOB_TRACE_OPTION_KEY } from "../observe.constants.js";
+import { OperationHandle, SpanRecorder } from "../recorder/span-recorder.js";
 import { KeyOf } from "../types/key-of.type.js";
 import { REQUEST_ID_PATTERN } from "../utils/default-trace-id-generator.util.js";
 import { uuidv7 } from "../utils/uuid-v7.util.js";
@@ -83,9 +79,8 @@ function isSameJob(outer: unknown, job: ActiveJob): boolean {
  */
 export class JobTraceRunner<Store extends Record<string, unknown>> {
   constructor(
-    private readonly observeAgentSharedBuffer: ObserveAgentSharedBuffer,
     private readonly options: ObserveModuleOptionsWithDefaults,
-    private readonly operationTraceRegistry: OperationTraceRegistry,
+    private readonly spanRecorder: SpanRecorder,
     private readonly asyncLocalStorage: AsyncLocalStorage<
       Map<KeyOf<Store>, any>
     >,
@@ -258,12 +253,11 @@ export class JobTraceRunner<Store extends Record<string, unknown>> {
         return invoke(() => undefined);
       }
 
-      // The registry key is always this run's own. The inherited id may belong
-      // to a request still open in this process, and a retry reuses it.
-      const registryKey = uuidv7();
-      const traceId = this.readInheritedTraceId(job.opts) ?? registryKey;
+      // The recorder gives every run a registry key of its own: the inherited
+      // id may belong to a request still open in this process, and a retry
+      // reuses it.
+      const traceId = this.readInheritedTraceId(job.opts) ?? uuidv7();
       store.set(this.options.traceIdKey, traceId);
-      store.set(TRACE_REGISTRY_KEY as KeyOf<Store>, registryKey);
 
       const context: JobContext = {
         queueName: job.queueName,
@@ -278,73 +272,61 @@ export class JobTraceRunner<Store extends Record<string, unknown>> {
         }
       }
 
-      if (this.isIgnored(context)) {
-        // The trace id stays in the store so logs and jobs enqueued from here
-        // still correlate; nothing is registered under the registry key, so
-        // its spans have no trace to join.
-        return invoke(() => undefined);
-      }
-
-      this.operationTraceRegistry.startTrace(
-        registryKey,
+      return this.spanRecorder.runOperation(
         {
+          kind: "job",
+          correlationId: traceId,
           tags: this.options.jobs?.tags,
-          ...context,
-          ...job.metadata,
-        } as JobSnapshot,
-        traceId,
-      );
-
-      let settled = false;
-      const settle = (status: JobStatus) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        setTimeout(async () => {
-          this.operationTraceRegistry.endTrace(registryKey, { status });
-
-          const snapshot = (await this.operationTraceRegistry.pluckSnapshot(
-            registryKey,
-          )) as JobSnapshot | undefined;
-
-          // `pluckSnapshot` deletes what it returns, so a trace already
-          // plucked answers undefined, and the encoder would dereference it
-          // inside a `setTimeout`, where no try/catch can reach: an unhandled
-          // TypeError that took the whole process down.
-          //
-          // Dropped rather than reported: there is no snapshot, so there is
-          // nothing to send, and losing one job's self-instrumentation is
-          // not worth a crash loop.
-          if (!snapshot) {
-            return;
+          job: { ...context, ...job.metadata },
+          // An ignored run keeps its trace id in the store, so logs and jobs
+          // enqueued from here still correlate; it just records nothing.
+          record: !this.isIgnored(context),
+        },
+        (operation) => {
+          if (!operation) {
+            return invoke(() => undefined);
           }
-          this.observeAgentSharedBuffer.insertJobSnapshot(snapshot);
-        }, 0);
-      };
-
-      try {
-        const returnValue = invoke(settle);
-        if (returnValue instanceof Promise) {
-          return returnValue
-            .then((ret) => {
-              settle("completed");
-              return ret;
-            })
-            .catch((error: Error) => {
-              settle("failed");
-              throw error;
-            }) as T;
-        }
-
-        if (!settlesItself) {
-          settle("completed");
-        }
-        return returnValue;
-      } catch (error) {
-        settle("failed");
-        throw error;
-      }
+          return this.invokeWithin(operation, invoke, settlesItself);
+        },
+      );
     });
+  }
+
+  private invokeWithin<T>(
+    operation: OperationHandle,
+    invoke: (settle: (status: JobStatus) => void) => T,
+    settlesItself: boolean,
+  ): T {
+    let settled = false;
+    const settle = (status: JobStatus) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      operation.end(() => ({ status }));
+    };
+
+    try {
+      const returnValue = invoke(settle);
+      if (returnValue instanceof Promise) {
+        return returnValue
+          .then((ret) => {
+            settle("completed");
+            return ret;
+          })
+          .catch((error: Error) => {
+            settle("failed");
+            throw error;
+          }) as T;
+      }
+
+      if (!settlesItself) {
+        settle("completed");
+      }
+      return returnValue;
+    } catch (error) {
+      settle("failed");
+      throw error;
+    }
   }
 }

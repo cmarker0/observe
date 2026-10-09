@@ -1,19 +1,14 @@
 import { Inject, Injectable, Logger, OnModuleInit } from "@nestjs/common";
 import { DiscoveryService, MetadataScanner, ModuleRef } from "@nestjs/core";
 import { AsyncLocalStorage } from "async_hooks";
-import { ObserveAgentSharedBuffer } from "../agent/observe-agent.shared-buffer.js";
-import {
-  GraphQLResolveInfoLike,
-  RequestSnapshot,
-} from "../interfaces/index.js";
+import { GraphQLResolveInfoLike } from "../interfaces/index.js";
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/observe-options.interface.js";
+import { OBSERVE_OPTIONS } from "../observe.constants.js";
 import {
-  CALLER_METADATA_KEY,
-  OBSERVE_OPTIONS,
-  TRACE_REGISTRY_KEY,
-} from "../observe.constants.js";
-import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
-import { TraceSamplerService } from "../services/trace-sampler.service.js";
+  OperationHandle,
+  SpanRecorder,
+  StepHandle,
+} from "../recorder/span-recorder.js";
 import { KeyOf } from "../types/key-of.type.js";
 import {
   parseGraphQLOperation,
@@ -72,15 +67,11 @@ interface GqlRequestEndContext extends GqlRequestStartContext {
  * `onRequestEnd`.
  */
 interface OperationState {
-  traceId: string;
-  spanId: string;
-  className: string;
-  methodKey: string;
-  /** The caller this operation displaced, restored once it ends. */
-  previousCallerId: string | undefined;
-  store: Map<string, unknown> | undefined;
-  /** Whether this service opened the trace, and therefore has to ship it. */
-  ownsTrace: boolean;
+  step: StepHandle;
+  /** Hands the operation back whatever step was current before this one. */
+  restore: () => void;
+  /** Set when this service opened the operation, and therefore has to ship it. */
+  operation: OperationHandle | undefined;
   context: unknown;
 }
 
@@ -135,9 +126,7 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
     >,
     @Inject(OBSERVE_OPTIONS)
     private readonly options: ObserveModuleOptionsWithDefaults,
-    private readonly operationTraceRegistry: OperationTraceRegistry,
-    private readonly observeAgentSharedBuffer: ObserveAgentSharedBuffer,
-    private readonly traceSamplerService: TraceSamplerService,
+    private readonly spanRecorder: SpanRecorder,
     private readonly moduleRef: ModuleRef,
     private readonly discoveryService: DiscoveryService,
     private readonly metadataScanner: MetadataScanner,
@@ -247,25 +236,14 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
     // the field every reader - detail views, search, the trigram index -
     // already treats as "what was this request". The operation name is not
     // recorded separately: a document that has one carries it inline.
-    const attributes: RequestSnapshot["attributes"] = {
+    const attributes = {
       originalUrl: parsed.sanitizedDocument,
     };
 
-    const store = this.asyncLocalStorage.getStore();
-    // The registry key, where the transport in front gave the request one
-    // of its own; the trace id otherwise, which is then the key as well.
-    const traceId =
-      store?.get(TRACE_REGISTRY_KEY as KeyOf<Store>) ??
-      store?.get(this.options.traceIdKey);
-
-    if (traceId) {
-      return this.startWithinRequest(
-        traceId,
-        operationId,
-        attributes,
-        info,
-        ctx,
-      );
+    // A trace id in the store means a transport agent in front already owns
+    // this operation - recorded or not.
+    if (this.asyncLocalStorage.getStore()?.get(this.options.traceIdKey)) {
+      return this.startWithinRequest(operationId, attributes, info, ctx);
     }
     return this.startAsOperation(operationId, attributes, info, ctx);
   }
@@ -288,29 +266,17 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
       return;
     }
 
-    if (state.store) {
-      // Handing the request back whatever owned it before this operation. The
-      // store is shared by reference across the request, so this is a real
-      // restore rather than a scoped one.
-      if (state.previousCallerId === undefined) {
-        state.store.delete(CALLER_METADATA_KEY);
-      } else {
-        state.store.set(CALLER_METADATA_KEY, state.previousCallerId);
-      }
-    }
+    // Restored before the step ends: the store is shared by reference across
+    // the request, so this is a real restore rather than a scoped one.
+    state.restore();
+    state.step.end(this.toSpanError(ctx.errors));
 
-    this.operationTraceRegistry.internalEndTraceStep(
-      state.traceId,
-      `${state.className}#${state.methodKey}`,
-      state.className,
-      state.methodKey,
-      state.spanId,
-      this.toSpanError(ctx.errors),
-    );
-
-    if (state.ownsTrace) {
-      this.endOperationTrace(state.traceId, state.context);
-    }
+    // No status code: GraphQL has none. An operation that errored is
+    // classified from its root span instead, which keeps a failing operation
+    // out of the success bucket.
+    state.operation?.end(() => ({
+      userId: this.options.graphql?.getUserId?.(state.context),
+    }));
   }
 
   /**
@@ -320,19 +286,18 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
    * shipping the snapshot.
    */
   private startWithinRequest(
-    traceId: string,
     operationId: string,
-    attributes: RequestSnapshot["attributes"],
+    attributes: { originalUrl?: string },
     info: GraphQLResolveInfoLike,
     ctx: GqlRequestStartContext,
   ): OperationState | undefined {
     this.applyAttributes(info, ctx.context);
-    this.operationTraceRegistry.addGraphQLMetadataToTrace(traceId, {
+    this.spanRecorder.currentOperation()?.annotate({
       operationId,
       tags: this.options.graphql?.tags,
       attributes,
     });
-    return this.openSpan(traceId, info, ctx, false);
+    return this.openSpan(info, ctx, undefined);
   }
 
   /**
@@ -360,17 +325,13 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
    */
   private startAsOperation(
     operationId: string,
-    attributes: RequestSnapshot["attributes"],
+    attributes: { originalUrl?: string },
     info: GraphQLResolveInfoLike,
     ctx: GqlRequestStartContext,
   ): OperationState | undefined {
-    const shouldCapture = this.traceSamplerService.shouldCapture("graphql", {
-      operationId,
-    });
-    if (!shouldCapture) {
-      return undefined;
-    }
-
+    // Entered whether or not the operation ends up recorded, as every other
+    // agent does: a sampled-out operation in a shared context would otherwise
+    // inherit the previous operation's store, and with it that trace.
     const traceId = this.options.traceIdGenerator(info);
     const store = new Map<KeyOf<Store>, any>();
     store.set(this.options.traceIdKey, traceId);
@@ -378,14 +339,24 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
 
     this.applyAttributes(info, ctx.context);
 
-    this.operationTraceRegistry.startTrace(traceId, {
-      protocol: GRAPHQL_PROTOCOL,
-      operationId,
-      tags: this.options.graphql?.tags,
-      attributes,
-    });
-
-    return this.openSpan(traceId, info, ctx, true);
+    // The hook returns into execution rather than wrapping it, so there is
+    // nothing to run inside the operation: the handle is all that is kept.
+    const operation = this.spanRecorder.runOperation(
+      {
+        kind: "request",
+        correlationId: traceId,
+        protocol: GRAPHQL_PROTOCOL,
+        operationId,
+        tags: this.options.graphql?.tags,
+        attributes,
+        sampling: ["graphql", { operationId }],
+      },
+      (handle) => handle,
+    );
+    if (!operation) {
+      return undefined;
+    }
+    return this.openSpan(info, ctx, operation);
   }
 
   /**
@@ -395,10 +366,9 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
    * beside it.
    */
   private openSpan(
-    traceId: string,
     info: GraphQLResolveInfoLike,
     ctx: GqlRequestStartContext,
-    ownsTrace: boolean,
+    operation: OperationHandle | undefined,
   ): OperationState | undefined {
     // The resolver class that registered the field, so the span groups under
     // `OrdersResolver` rather than the schema's `Query`/`Mutation`. The schema
@@ -408,61 +378,18 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
       info.parentType.name,
       info.fieldName,
     );
-    const className = handler?.className ?? info.parentType.name;
-    const methodKey = handler?.methodKey ?? info.fieldName;
-
-    const store = this.asyncLocalStorage.getStore();
-    const previousCallerId = store?.get(CALLER_METADATA_KEY) as
-      | string
-      | undefined;
-
-    const spanId = this.operationTraceRegistry.internalStartTraceStep(
-      traceId,
-      className,
-      methodKey,
-      previousCallerId,
-    );
-    if (!spanId) {
-      // The trace was sampled out, or never started - an HTTP request that
-      // `http.ignore` dropped still carries a trace id in its store. Nothing to
-      // close, so the end hook is told to stand down.
+    const entered = this.spanRecorder.enterStep({
+      className: handler?.className ?? info.parentType.name,
+      methodKey: handler?.methodKey ?? info.fieldName,
+    });
+    if (!entered) {
+      // The operation was sampled out, or never started - an HTTP request
+      // that `http.ignore` dropped still carries a trace id in its store.
+      // Nothing to close, so the end hook is told to stand down.
       return undefined;
     }
 
-    store?.set(CALLER_METADATA_KEY, spanId);
-
-    return {
-      traceId,
-      spanId,
-      className,
-      methodKey,
-      previousCallerId,
-      store: store as Map<string, unknown> | undefined,
-      ownsTrace,
-      context: ctx.context,
-    };
-  }
-
-  /**
-   * Ends and ships a trace this service opened itself.
-   *
-   * No status code is passed: GraphQL has none. An operation that errored is
-   * classified from its root span instead, which is what keeps a failing
-   * operation out of the success bucket.
-   */
-  private endOperationTrace(traceId: string, context: unknown): void {
-    setTimeout(async () => {
-      const userId = this.options.graphql?.getUserId?.(context);
-      this.operationTraceRegistry.endTrace(traceId, { userId });
-
-      const snapshot = await this.operationTraceRegistry.pluckSnapshot(traceId);
-      if (!snapshot) {
-        return;
-      }
-      this.observeAgentSharedBuffer.insertRequestSnapshot(
-        snapshot as RequestSnapshot,
-      );
-    }, 0);
+    return { ...entered, operation, context: ctx.context };
   }
 
   /**

@@ -539,7 +539,7 @@ describe("OperationTraceRegistry", () => {
         "root",
         undefined,
       );
-      registry.addRouteMetadataToTrace("r1", 0, "/orders/:id");
+      registry.addRouteMetadataToTrace("r1", "/orders/:id");
       registry.internalEndTraceStep("r1", spanId, "Svc", "root", spanId);
       registry.endTrace("r1");
 
@@ -551,7 +551,7 @@ describe("OperationTraceRegistry", () => {
 
     it("ignores metadata for an unknown trace", () => {
       expect(() =>
-        registry.addRouteMetadataToTrace("nope", 0, "/x"),
+        registry.addRouteMetadataToTrace("nope", "/x"),
       ).not.toThrow();
     });
   });

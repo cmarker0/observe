@@ -3,6 +3,8 @@ import { AsyncLocalStorage } from "async_hooks";
 import { ObserveAgentSharedBuffer } from "../agent/observe-agent.shared-buffer.js";
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/index.js";
 import { CALLER_METADATA_KEY } from "../observe.constants.js";
+import { RegistrySpanRecorder } from "../recorder/registry-span-recorder.js";
+import { OperationTraceRegistry } from "./operation-trace.registry.js";
 import { StdoutForwarderService } from "./stdout-forwarder.service.js";
 
 interface CapturedEntry {
@@ -48,6 +50,7 @@ describe("StdoutForwarderService", () => {
       } as ObserveModuleOptionsWithDefaults,
       buffer as unknown as ObserveAgentSharedBuffer,
       als,
+      new RegistrySpanRecorder(als, {} as OperationTraceRegistry, TRACE_ID_KEY),
     );
   };
 

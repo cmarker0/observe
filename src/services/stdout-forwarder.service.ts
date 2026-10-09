@@ -10,7 +10,8 @@ import { ObserveAgentSharedBuffer } from "../agent/observe-agent.shared-buffer.j
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/index.js";
 import { parseLogLine } from "../utils/log-line.parser.js";
 import { LogRedactor } from "../utils/log-redactor.js";
-import { CALLER_METADATA_KEY, OBSERVE_OPTIONS } from "../observe.constants.js";
+import { OBSERVE_OPTIONS } from "../observe.constants.js";
+import { SpanRecorder } from "../recorder/span-recorder.js";
 
 /**
  * Cap on the unterminated tail held between writes.
@@ -77,6 +78,7 @@ export class StdoutForwarderService implements OnModuleInit, OnModuleDestroy {
     private readonly options: ObserveModuleOptionsWithDefaults,
     private readonly observeAgentSharedBuffer: ObserveAgentSharedBuffer,
     private readonly als: AsyncLocalStorage<Map<string, any>>,
+    private readonly spanRecorder: SpanRecorder,
   ) {
     this.redactor =
       this.options.redaction?.enabled === false
@@ -217,7 +219,7 @@ export class StdoutForwarderService implements OnModuleInit, OnModuleDestroy {
       // would file the line under a span it was never written inside.
       spanId:
         traceId === contextTraceId
-          ? store?.get(CALLER_METADATA_KEY)
+          ? this.spanRecorder.currentSpanId()
           : undefined,
       level: parsed.level,
       context: parsed.context,

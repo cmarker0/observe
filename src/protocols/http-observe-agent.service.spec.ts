@@ -5,6 +5,7 @@ import { ObserveModuleOptionsWithDefaults } from "../interfaces/observe-options.
 import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
 import { TraceSamplerService } from "../services/trace-sampler.service.js";
 import { ObserveAgentSharedBuffer } from "../agent/observe-agent.shared-buffer.js";
+import { RegistrySpanRecorder } from "../recorder/registry-span-recorder.js";
 import { HttpObserveAgentService } from "./http-observe-agent.service.js";
 
 describe("HttpObserveAgentService", () => {
@@ -40,17 +41,24 @@ describe("HttpObserveAgentService", () => {
       },
     } as unknown as OperationTraceRegistry;
 
+    const als = new AsyncLocalStorage<Map<string, any>>();
+    const recorder = new RegistrySpanRecorder(als, registry, "traceId");
+    recorder.attach(
+      {} as ObserveAgentSharedBuffer,
+      {
+        shouldCapture: () => true,
+      } as unknown as TraceSamplerService,
+    );
+
     return new HttpObserveAgentService(
       { httpAdapter } as unknown as HttpAdapterHost,
-      new AsyncLocalStorage<Map<string, any>>(),
+      als,
       {
         traceIdKey: "traceId",
         traceIdGenerator: () => "trace-1",
         http,
       } as unknown as ObserveModuleOptionsWithDefaults,
-      registry,
-      {} as ObserveAgentSharedBuffer,
-      { shouldCapture: () => true } as unknown as TraceSamplerService,
+      recorder,
     );
   };
 

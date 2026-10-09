@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "async_hooks";
 import { EventEmitter } from "events";
+import { RegistrySpanRecorder } from "../recorder/registry-span-recorder.js";
 import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
 import { createInstanceDecorator } from "./create-instance-decorator.instrument.js";
 
@@ -50,10 +51,10 @@ describe("createInstanceDecorator", () => {
       },
     } as unknown as OperationTraceRegistry;
 
-    decorate = createInstanceDecorator(als, registry, {
-      traceIdKey: TRACE_ID_KEY,
-      skipInstrumentation: () => false,
-    });
+    decorate = createInstanceDecorator(
+      new RegistrySpanRecorder(als, registry, TRACE_ID_KEY),
+      { skipInstrumentation: () => false },
+    );
   });
 
   describe("when decorating a class instance", () => {
@@ -261,12 +262,12 @@ describe("createInstanceDecorator", () => {
     it("respects skipInstrumentation", () => {
       const instance = new UserService();
       const skipping = createInstanceDecorator(
-        als,
-        {} as OperationTraceRegistry,
-        {
-          traceIdKey: TRACE_ID_KEY,
-          skipInstrumentation: () => true,
-        },
+        new RegistrySpanRecorder(
+          als,
+          {} as OperationTraceRegistry,
+          TRACE_ID_KEY,
+        ),
+        { skipInstrumentation: () => true },
       );
 
       expect(skipping(instance)).toBe(instance);
@@ -443,10 +444,10 @@ describe("createInstanceDecorator", () => {
           endCalls += 1;
         },
       } as unknown as OperationTraceRegistry;
-      noSnapshotDecorate = createInstanceDecorator(als, registry, {
-        traceIdKey: TRACE_ID_KEY,
-        skipInstrumentation: () => false,
-      });
+      noSnapshotDecorate = createInstanceDecorator(
+        new RegistrySpanRecorder(als, registry, TRACE_ID_KEY),
+        { skipInstrumentation: () => false },
+      );
     });
 
     it("runs the method without trying to close a step that never opened", () => {

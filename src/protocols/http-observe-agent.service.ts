@@ -13,15 +13,11 @@ import {
 import { HttpAdapterHost } from "@nestjs/core";
 import { AsyncLocalStorage } from "async_hooks";
 import { Subscription } from "rxjs";
-import { ObserveAgentSharedBuffer } from "../agent/observe-agent.shared-buffer.js";
-import { RequestSnapshot } from "../interfaces/index.js";
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/observe-options.interface.js";
-import { OBSERVE_OPTIONS, TRACE_REGISTRY_KEY } from "../observe.constants.js";
-import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
-import { TraceSamplerService } from "../services/trace-sampler.service.js";
+import { OBSERVE_OPTIONS } from "../observe.constants.js";
+import { OperationHandle, SpanRecorder } from "../recorder/span-recorder.js";
 import { KeyOf } from "../types/key-of.type.js";
 import { redactUrlQuery } from "../utils/redact-url-query.js";
-import { uuidv7 } from "../utils/uuid-v7.util.js";
 
 /**
  * How long an aborted request's handler gets to finish its spans before the
@@ -61,9 +57,7 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
     >,
     @Inject(OBSERVE_OPTIONS)
     private readonly options: ObserveModuleOptionsWithDefaults,
-    private readonly operationTraceRegistry: OperationTraceRegistry,
-    private readonly observeAgentSharedBuffer: ObserveAgentSharedBuffer,
-    private readonly traceSamplerService: TraceSamplerService,
+    private readonly spanRecorder: SpanRecorder,
   ) {
     this.queryParamsObfuscateRegex = toGlobalRegExp(
       this.options.http?.queryParamsObfuscateRegex,
@@ -77,22 +71,8 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
     }
 
     httpAdapter.setOnRouteTriggered(
-      (requestMethod: RequestMethod, path: string) => {
-        const store = this.asyncLocalStorage.getStore();
-        if (!store) {
-          return;
-        }
-        const traceId =
-          store.get(TRACE_REGISTRY_KEY as KeyOf<Store>) ??
-          store.get(this.options.traceIdKey);
-        if (!traceId) {
-          return;
-        }
-        this.operationTraceRegistry.addRouteMetadataToTrace(
-          traceId,
-          requestMethod,
-          path,
-        );
+      (_requestMethod: RequestMethod, path: string) => {
+        this.spanRecorder.currentOperation()?.setRoute(path);
       },
     );
   }
@@ -158,97 +138,60 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
         }
       }
 
-      if (this.shouldIgnoreRequest(req)) {
-        return done();
-      }
-
-      const shouldCapture = this.traceSamplerService.shouldCapture("http", {
-        url: req.url,
-        method: req.method,
-      });
-      if (!shouldCapture) {
-        return done();
-      }
-      // Sensitive query parameters are masked whether or not the deployment
-      // configured anything: an opt-in redactor protects only those who
-      // already knew to ask, and a reset token in a stored URL is the same
-      // disclosure either way. A configured regex still applies, on top rather
-      // than instead - it exists for the keys only that deployment knows
-      // about.
-      const redactedUrl = redactUrlQuery(
-        req.url,
-        this.operationTraceRegistry.getRedactor(),
-      );
-      const originalUrl = this.queryParamsObfuscateRegex
-        ? redactedUrl.replaceAll(this.queryParamsObfuscateRegex, "[REDACTED]")
-        : redactedUrl;
-
-      // An adopted `x-request-id` is not unique to this request: a caller
-      // that fans out, or retries, sends the same id twice, and both requests
-      // can be open here at once. The second gets a registry key of its own -
-      // only the second, so the ordinary request is still keyed by its id.
-      let registryKey = traceId;
-      if (this.operationTraceRegistry.hasTrace(traceId)) {
-        registryKey = uuidv7();
-        store.set(TRACE_REGISTRY_KEY as KeyOf<Store>, registryKey);
-      }
-
-      this.operationTraceRegistry.startTrace(
-        registryKey,
+      const record = !this.shouldIgnoreRequest(req);
+      this.spanRecorder.runOperation(
         {
-          protocol: req.protocol,
+          kind: "request",
+          correlationId: traceId,
+          // Read only for a request that may be recorded.
+          ...(record && {
+            protocol: req.protocol,
+            attributes: {
+              method: req.method,
+              originalUrl: this.redactUrl(req.url),
+            },
+          }),
           tags: this.options.http?.tags,
-          attributes: {
-            method: req.method,
-            originalUrl,
-          },
+          sampling: ["http", { url: req.url, method: req.method }],
+          record,
         },
-        traceId,
+        (operation) => {
+          if (operation) {
+            this.evictTraceOnClientAbort(res, operation);
+          }
+        },
       );
-      this.evictTraceOnClientAbort(res, registryKey);
       done();
     });
   }
 
-  endHttpRequestTracing(req: unknown, res: { statusCode: number }): void {
-    const store = this.asyncLocalStorage.getStore();
-    if (!store) {
-      return;
-    }
-    const traceId =
-      store.get(TRACE_REGISTRY_KEY as KeyOf<Store>) ??
-      store.get(this.options.traceIdKey);
-    if (!traceId) {
-      return;
-    }
-    setTimeout(async () => {
-      let userId: string | undefined;
-      if (this.options.http?.getUserId) {
-        userId = this.options.http?.getUserId?.(req);
-      }
-      this.operationTraceRegistry.endTrace(traceId, {
-        statusCode: res.statusCode,
-        userId,
-      });
+  /**
+   * Sensitive query parameters are masked whether or not the deployment
+   * configured anything: an opt-in redactor protects only those who already
+   * knew to ask, and a reset token in a stored URL is the same disclosure
+   * either way. A configured regex still applies, on top rather than instead -
+   * it exists for the keys only that deployment knows about.
+   */
+  private redactUrl(url: string): string {
+    const redactedUrl = redactUrlQuery(url, this.spanRecorder.getRedactor());
+    return this.queryParamsObfuscateRegex
+      ? redactedUrl.replaceAll(this.queryParamsObfuscateRegex, "[REDACTED]")
+      : redactedUrl;
+  }
 
-      const snapshot = await this.operationTraceRegistry.pluckSnapshot(traceId);
-      if (!snapshot) {
-        return;
-      }
-      if (shouldCaptureRequest(snapshot, this.options.http?.capture)) {
-        const captured = captureRequest(
-          req,
-          this.options.http?.capture,
-          this.operationTraceRegistry.getRedactor(),
-        );
-        if (captured) {
-          (snapshot as RequestSnapshot).request = captured;
-        }
-      }
-      this.observeAgentSharedBuffer.insertRequestSnapshot(
-        snapshot as RequestSnapshot,
-      );
-    }, 0);
+  endHttpRequestTracing(req: unknown, res: { statusCode: number }): void {
+    this.spanRecorder.currentOperation()?.end(() => ({
+      statusCode: res.statusCode,
+      userId: this.options.http?.getUserId?.(req),
+      captureRequest: (finished) =>
+        shouldCaptureRequest(finished, this.options.http?.capture)
+          ? captureRequest(
+              req,
+              this.options.http?.capture,
+              this.spanRecorder.getRedactor(),
+            )
+          : undefined,
+    }));
   }
 
   /**
@@ -270,7 +213,10 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
    * period lets the handler drain first; `unref` keeps the timer from holding
    * a shutting-down process open.
    */
-  private evictTraceOnClientAbort(res: unknown, traceId: string): void {
+  private evictTraceOnClientAbort(
+    res: unknown,
+    operation: OperationHandle,
+  ): void {
     const response = res as {
       on?: (event: string, listener: () => void) => void;
       writableFinished?: boolean;
@@ -283,7 +229,7 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
         return;
       }
       const timer = setTimeout(
-        () => this.operationTraceRegistry.abandonTrace(traceId),
+        () => operation.abandon(),
         ABORTED_TRACE_EVICTION_GRACE_MS,
       );
       timer.unref?.();

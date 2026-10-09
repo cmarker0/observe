@@ -9,11 +9,8 @@ import { ModulesContainer } from "@nestjs/core";
 import type { BaseRpcContext, Server, Transport } from "@nestjs/microservices";
 import { AsyncLocalStorage } from "async_hooks";
 import { Subscription } from "rxjs";
-import { ObserveAgentSharedBuffer } from "../agent/observe-agent.shared-buffer.js";
-import { RequestSnapshot } from "../interfaces/index.js";
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/observe-options.interface.js";
-import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
-import { TraceSamplerService } from "../services/trace-sampler.service.js";
+import { SpanRecorder } from "../recorder/span-recorder.js";
 import { KeyOf } from "../types/key-of.type.js";
 import { OBSERVE_OPTIONS } from "../observe.constants.js";
 import {
@@ -63,9 +60,7 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
     @Inject(OBSERVE_OPTIONS)
     private readonly options: ObserveModuleOptionsWithDefaults,
     private readonly modulesContainer: ModulesContainer,
-    private readonly operationTraceRegistry: OperationTraceRegistry,
-    private readonly observeAgentSharedBuffer: ObserveAgentSharedBuffer,
-    private readonly traceSamplerService: TraceSamplerService,
+    private readonly spanRecorder: SpanRecorder,
   ) {}
 
   onModuleInit() {
@@ -179,23 +174,22 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
         }
       }
 
-      if (this.options.rpc?.ignore?.(transportId, ctx)) {
-        return done();
-      }
-
-      const shouldCapture = this.traceSamplerService.shouldCapture("rpc", {
-        transport: transportId.toString(),
-        ctx: ctx,
-      });
-      if (!shouldCapture) {
-        return done();
-      }
-      this.operationTraceRegistry.startTrace(traceId, {
-        protocol: this.toProtocolName(transportId),
-        operationId: this.getOperationIdFromContext(ctx),
-        tags: this.options.rpc?.tags,
-      });
-      return done();
+      const record = !this.options.rpc?.ignore?.(transportId, ctx);
+      return this.spanRecorder.runOperation(
+        {
+          kind: "request",
+          correlationId: traceId,
+          // Read only for an operation that may be recorded.
+          ...(record && {
+            protocol: this.toProtocolName(transportId),
+            operationId: this.getOperationIdFromContext(ctx),
+          }),
+          tags: this.options.rpc?.tags,
+          sampling: ["rpc", { transport: transportId.toString(), ctx }],
+          record,
+        },
+        () => done(),
+      );
     });
   }
 
@@ -221,22 +215,20 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
 
       return new Promise<unknown>((resolve) => {
         setTimeout(() => {
-          if (this.options.grpc?.ignore?.(call)) {
-            return resolve(done());
-          }
-
-          const shouldCapture = this.traceSamplerService.shouldCapture("grpc", {
-            call,
-          });
-          if (!shouldCapture) {
-            return resolve(done());
-          }
-          this.operationTraceRegistry.startTrace(traceId, {
-            protocol: this.toProtocolName(transportId),
-            operationId: call.operationId,
-            tags: this.options.grpc?.tags,
-          });
-          resolve(done());
+          resolve(
+            this.spanRecorder.runOperation(
+              {
+                kind: "request",
+                correlationId: traceId,
+                protocol: this.toProtocolName(transportId),
+                operationId: call.operationId,
+                tags: this.options.grpc?.tags,
+                sampling: ["grpc", { call }],
+                record: !this.options.grpc?.ignore?.(call),
+              },
+              () => done(),
+            ),
+          );
         }, 0);
       });
     });
@@ -246,40 +238,18 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
     transportId: Transport | symbol,
     ctx: BaseRpcContext | GrpcCall,
   ): void {
-    const store = this.asyncLocalStorage.getStore();
-    if (!store) {
-      return;
-    }
-    const traceId = store.get(this.options.traceIdKey);
-    if (!traceId) {
-      return;
-    }
-    setTimeout(async () => {
+    this.spanRecorder.currentOperation()?.end(() => {
       let userId: string | undefined;
       if (transportId === this.microservices!.Transport.GRPC) {
-        if (this.options.grpc?.getUserId) {
-          userId = this.options.grpc?.getUserId?.(ctx as GrpcCall);
-        }
+        userId = this.options.grpc?.getUserId?.(ctx as GrpcCall);
       } else {
-        if (this.options.rpc?.getUserId) {
-          userId = this.options.rpc?.getUserId?.(
-            transportId,
-            ctx as BaseRpcContext,
-          );
-        }
+        userId = this.options.rpc?.getUserId?.(
+          transportId,
+          ctx as BaseRpcContext,
+        );
       }
-      this.operationTraceRegistry.endTrace(traceId, {
-        userId,
-      });
-
-      const snapshot = await this.operationTraceRegistry.pluckSnapshot(traceId);
-      if (!snapshot) {
-        return;
-      }
-      this.observeAgentSharedBuffer.insertRequestSnapshot(
-        snapshot as RequestSnapshot,
-      );
-    }, 0);
+      return { userId };
+    });
   }
 
   private getOperationIdFromContext(ctx: BaseRpcContext): string {
@@ -307,9 +277,7 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
         // `toProtocolName` - and there is no universal accessor for its
         // routing key. Throwing here would fail the message before `done()`
         // ever ran, so fall back to a conventional accessor when one exists.
-        const pattern = (
-          ctx as { getPattern?: () => unknown }
-        )?.getPattern?.();
+        const pattern = (ctx as { getPattern?: () => unknown })?.getPattern?.();
         return typeof pattern === "string" ? pattern : "unknown";
       }
     }

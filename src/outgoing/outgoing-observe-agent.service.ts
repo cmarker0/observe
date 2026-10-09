@@ -7,7 +7,7 @@ import {
 import { AsyncLocalStorage } from "async_hooks";
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/index.js";
 import { OBSERVE_OPTIONS } from "../observe.constants.js";
-import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
+import { SpanRecorder } from "../recorder/span-recorder.js";
 import {
   loadAsResolvedBy,
   loadOptionalPeer,
@@ -56,18 +56,14 @@ export class OutgoingObserveAgentService implements OnApplicationShutdown {
   constructor(
     @Inject(OBSERVE_OPTIONS)
     private readonly options: ObserveModuleOptionsWithDefaults,
-    operationTraceRegistry: OperationTraceRegistry,
+    spanRecorder: SpanRecorder,
     asyncLocalStorage: AsyncLocalStorage<Map<any, any>>,
   ) {
     const outgoing = this.options.outgoing;
     if (outgoing === false) {
       return;
     }
-    const recorder = new OutgoingSpanRecorder(
-      operationTraceRegistry,
-      asyncLocalStorage,
-      this.options.traceIdKey,
-    );
+    const recorder = new OutgoingSpanRecorder(spanRecorder);
 
     if (outgoing?.database !== false) {
       this.patchDriver("pg", "pg", DRIVER_DEPENDENTS.pg, (module) =>
@@ -94,7 +90,7 @@ export class OutgoingObserveAgentService implements OnApplicationShutdown {
           return typeof traceId === "string" ? traceId : undefined;
         },
         typeof outgoing?.http === "object" ? outgoing.http : {},
-        () => operationTraceRegistry.getRedactor(),
+        () => spanRecorder.getRedactor(),
       );
     }
   }

@@ -1,12 +1,11 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
 import { AsyncLocalStorage } from "async_hooks";
 import type { Job } from "bullmq";
-import { ObserveAgentSharedBuffer } from "../agent/observe-agent.shared-buffer.js";
 import {
   JobSnapshot,
   ObserveModuleOptionsWithDefaults,
 } from "../interfaces/index.js";
-import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
+import { SpanRecorder } from "../recorder/span-recorder.js";
 import { KeyOf } from "../types/key-of.type.js";
 import { OBSERVE_OPTIONS } from "../observe.constants.js";
 import { JobRunDescriptor, JobTraceRunner } from "./job-trace-runner.js";
@@ -50,16 +49,14 @@ export class QueueObserveAgentService<Store extends Record<string, unknown>> {
   private readonly runner: JobTraceRunner<Store>;
 
   constructor(
-    observeAgentSharedBuffer: ObserveAgentSharedBuffer,
     @Inject(OBSERVE_OPTIONS)
     options: ObserveModuleOptionsWithDefaults,
-    operationTraceRegistry: OperationTraceRegistry,
+    spanRecorder: SpanRecorder,
     asyncLocalStorage: AsyncLocalStorage<Map<KeyOf<Store>, any>>,
   ) {
     this.runner = new JobTraceRunner(
-      observeAgentSharedBuffer,
       options,
-      operationTraceRegistry,
+      spanRecorder,
       asyncLocalStorage,
       this.logger,
     );

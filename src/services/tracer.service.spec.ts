@@ -3,6 +3,7 @@ import { ObserveAgentSharedBuffer } from "../agent/observe-agent.shared-buffer.j
 import { CustomMetric } from "../interfaces/index.js";
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/observe-options.interface.js";
 import { CALLER_METADATA_KEY } from "../observe.constants.js";
+import { RegistrySpanRecorder } from "../recorder/registry-span-recorder.js";
 import { OperationTraceRegistry } from "./operation-trace.registry.js";
 import { TracerService } from "./tracer.service.js";
 
@@ -33,9 +34,14 @@ describe("TracerService", () => {
       upsertCustomMetric: (metric: CustomMetric) => upserted.push(metric),
     } as unknown as ObserveAgentSharedBuffer;
 
-    tracer = new TracerService(registry, als as never, buffer, {
-      traceIdKey: TRACE_ID_KEY,
-    } as ObserveModuleOptionsWithDefaults);
+    tracer = new TracerService(
+      new RegistrySpanRecorder(als, registry, TRACE_ID_KEY),
+      als as never,
+      buffer,
+      {
+        traceIdKey: TRACE_ID_KEY,
+      } as ObserveModuleOptionsWithDefaults,
+    );
   });
 
   /** Runs `fn` as though inside an instrumented request with one open span. */

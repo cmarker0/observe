@@ -7,12 +7,8 @@ import { ObserveModuleOptionsWithDefaults } from "../interfaces/index.js";
 import { TraceSpanDelegate } from "../trace-span.delegate.js";
 import { KeyOf } from "../types/key-of.type.js";
 import { Path, PathValue } from "../types/path-value.type.js";
-import {
-  CALLER_METADATA_KEY,
-  OBSERVE_OPTIONS,
-  TRACE_REGISTRY_KEY,
-} from "../observe.constants.js";
-import { OperationTraceRegistry } from "./operation-trace.registry.js";
+import { OBSERVE_OPTIONS } from "../observe.constants.js";
+import { SpanRecorder } from "../recorder/span-recorder.js";
 
 @Injectable()
 export class TracerService<
@@ -30,7 +26,7 @@ export class TracerService<
   private readonly summaries = new Map<string, Summary<any>>();
 
   constructor(
-    private readonly operationTraceRegistry: OperationTraceRegistry,
+    private readonly spanRecorder: SpanRecorder,
     private readonly als: AsyncLocalStorage<Map<KeyOf<Store> | TraceKey, any>>,
     private readonly observeAgentSharedBuffer: ObserveAgentSharedBuffer,
     @Inject(OBSERVE_OPTIONS)
@@ -51,13 +47,9 @@ export class TracerService<
         'AsyncLocalStorage is not initialized. Ensure that you are using the "createSpan" method within an async context.',
       );
     }
-    const traceId = this.requireTraceId(store, "createSpan");
-    const callerId = store.get(CALLER_METADATA_KEY) as string | undefined;
-    return this.operationTraceRegistry.createManualSpan(
-      traceId,
-      callerId,
-      name,
-      callback,
+    this.requireTraceId(store, "createSpan");
+    return this.spanRecorder.runManualSpan(name, (sink) =>
+      callback(new TraceSpanDelegate(sink)),
     );
   }
 
@@ -77,40 +69,20 @@ export class TracerService<
       );
     }
     const traceId = this.requireTraceId(store, "activeSpan");
-    const callerId = store.get(CALLER_METADATA_KEY) as string | undefined;
-    const activeOngoingEvent = this.operationTraceRegistry.getActiveSpan(
-      traceId,
-      callerId,
-    );
-    if (!activeOngoingEvent && !this.operationTraceRegistry.hasTrace(traceId)) {
-      // The store carries the id for log correlation, but no trace was opened
-      // under it: `http.ignore`, `jobs.ignore`, or the sampler said no. Which
-      // operations get recorded is configuration; a handler tagging its span
-      // must not start failing because someone changed it.
+    const span = this.spanRecorder.activeSpan();
+    if (span === "untraced") {
+      // The store carries the id for log correlation, but the operation is
+      // not recorded: `http.ignore`, `jobs.ignore`, or the sampler said no.
+      // Which operations get recorded is configuration; a handler tagging its
+      // span must not start failing because someone changed it.
       return new TraceSpanDelegate("", undefined, {});
     }
-    if (!activeOngoingEvent) {
+    if (!span) {
       throw new Error(
         `No active span found for traceId: ${traceId}. Ensure that a span is created before calling "activeSpan".`,
       );
     }
-
-    let tags = activeOngoingEvent.tags;
-    if (!tags) {
-      tags = {};
-      activeOngoingEvent.tags = tags;
-    }
-
-    const traceSpanDelegate = new TraceSpanDelegate(
-      // Optional on the shared `TraceSpan` interface, always set on the nodes
-      // the registry builds - and `getActiveSpan` only ever returns one of
-      // those.
-      activeOngoingEvent.spanId ?? "",
-      activeOngoingEvent.name,
-      tags,
-    );
-
-    return traceSpanDelegate;
+    return new TraceSpanDelegate(span);
   }
 
   /**
@@ -128,21 +100,12 @@ export class TracerService<
       );
     }
 
-    const traceId =
-      store.get(TRACE_REGISTRY_KEY as KeyOf<Store>) ??
-      store.get(this.options.traceIdKey);
-    if (typeof traceId !== "string") {
+    if (typeof store.get(this.options.traceIdKey) !== "string") {
       // Reporting an error must not raise one. The registry warned and gave up
       // in this case anyway, so the outcome is unchanged.
       return;
     }
-    const callerId = store.get(CALLER_METADATA_KEY) as string | undefined;
-    this.operationTraceRegistry.captureError(
-      traceId,
-      callerId,
-      error,
-      tags ?? {},
-    );
+    this.spanRecorder.captureError(error, tags);
   }
 
   /**
@@ -380,9 +343,7 @@ export class TracerService<
     store: Map<KeyOf<Store>, unknown>,
     method: string,
   ): string {
-    const traceId =
-      store.get(TRACE_REGISTRY_KEY as KeyOf<Store>) ??
-      store.get(this.options.traceIdKey);
+    const traceId = store.get(this.options.traceIdKey);
     if (typeof traceId !== "string") {
       throw new Error(
         `No trace id found in the current context. Ensure that you are using the "${method}" method within a traced operation.`,

@@ -4,7 +4,19 @@ import { ObserveAgentSharedBuffer } from "../agent/observe-agent.shared-buffer.j
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/index.js";
 import { TRACE_REGISTRY_KEY } from "../observe.constants.js";
 import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
+import { RegistrySpanRecorder } from "../recorder/registry-span-recorder.js";
 import { JobRunDescriptor, JobTraceRunner } from "./job-trace-runner.js";
+
+/** The production recorder over `registry`, shipping into `buffer`. */
+function recorderOver(
+  als: AsyncLocalStorage<Map<string, unknown>>,
+  registry: OperationTraceRegistry,
+  buffer: object,
+) {
+  const recorder = new RegistrySpanRecorder(als, registry, "traceId");
+  recorder.attach(buffer as ObserveAgentSharedBuffer);
+  return recorder;
+}
 
 /**
  * `jobs.ignore`, below every driver: BullMQ, Bull and `@nestjs/schedule` all
@@ -21,9 +33,8 @@ describe("JobTraceRunner: jobs.ignore", () => {
 
   const createRunner = (jobs: ObserveModuleOptionsWithDefaults["jobs"]) =>
     new JobTraceRunner(
-      { insertJobSnapshot } as unknown as ObserveAgentSharedBuffer,
       { traceIdKey: TRACE_ID_KEY, jobs } as ObserveModuleOptionsWithDefaults,
-      registry,
+      recorderOver(als, registry, { insertJobSnapshot }),
       als as never,
       { warn, debug: vi.fn() } as unknown as Logger,
     );
@@ -141,9 +152,8 @@ describe("JobTraceRunner: a run nested in its own job's run", () => {
     als = new AsyncLocalStorage();
     registry = new OperationTraceRegistry(als as never, false);
     runner = new JobTraceRunner(
-      { insertJobSnapshot: vi.fn() } as unknown as ObserveAgentSharedBuffer,
       { traceIdKey: TRACE_ID_KEY } as ObserveModuleOptionsWithDefaults,
-      registry,
+      recorderOver(als, registry, { insertJobSnapshot: vi.fn() }),
       als as never,
       { warn: vi.fn(), debug: vi.fn() } as unknown as Logger,
     );
@@ -186,9 +196,8 @@ describe("JobTraceRunner: patchEnqueue", () => {
   beforeEach(() => {
     als = new AsyncLocalStorage();
     runner = new JobTraceRunner(
-      {} as ObserveAgentSharedBuffer,
       { traceIdKey: TRACE_ID_KEY } as ObserveModuleOptionsWithDefaults,
-      {} as OperationTraceRegistry,
+      recorderOver(als, {} as OperationTraceRegistry, {}),
       als as never,
       { warn: vi.fn(), debug: vi.fn() } as unknown as Logger,
     );

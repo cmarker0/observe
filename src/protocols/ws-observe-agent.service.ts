@@ -1,14 +1,11 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
 import { AsyncLocalStorage } from "async_hooks";
-import { ObserveAgentSharedBuffer } from "../agent/observe-agent.shared-buffer.js";
 import {
   ObserveModuleOptionsWithDefaults,
-  RequestSnapshot,
   WsMessageContext,
 } from "../interfaces/index.js";
 import { OBSERVE_OPTIONS } from "../observe.constants.js";
-import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
-import { TraceSamplerService } from "../services/trace-sampler.service.js";
+import { OperationHandle, SpanRecorder } from "../recorder/span-recorder.js";
 import { KeyOf } from "../types/key-of.type.js";
 import {
   describePeerLoadError,
@@ -50,11 +47,9 @@ export class WsObserveAgentService<Store extends Record<string, unknown>> {
   private readonly logger = new Logger(WsObserveAgentService.name);
 
   constructor(
-    private readonly observeAgentSharedBuffer: ObserveAgentSharedBuffer,
     @Inject(OBSERVE_OPTIONS)
     private readonly options: ObserveModuleOptionsWithDefaults,
-    private readonly operationTraceRegistry: OperationTraceRegistry,
-    private readonly traceSamplerService: TraceSamplerService,
+    private readonly spanRecorder: SpanRecorder,
     private readonly asyncLocalStorage: AsyncLocalStorage<
       Map<KeyOf<Store>, any>
     >,
@@ -175,54 +170,52 @@ export class WsObserveAgentService<Store extends Record<string, unknown>> {
         }
       }
 
-      if (
-        this.options.ws?.ignore?.(message) ||
-        !this.traceSamplerService.shouldCapture("ws", {
-          gateway: message.gateway,
-          pattern: message.pattern,
-        })
-      ) {
-        return invoke();
-      }
-
-      this.operationTraceRegistry.startTrace(traceId, {
-        protocol: "ws",
-        operationId: `${message.gateway}:${message.pattern}`,
-        tags: this.options.ws?.tags,
-      });
-
-      const endTrace = () => {
-        setTimeout(async () => {
-          this.operationTraceRegistry.endTrace(traceId, {
-            userId: this.options.ws?.getUserId?.(message),
-          });
-          const snapshot =
-            await this.operationTraceRegistry.pluckSnapshot(traceId);
-          if (!snapshot) {
-            return;
+      return this.spanRecorder.runOperation(
+        {
+          kind: "request",
+          correlationId: traceId,
+          protocol: "ws",
+          operationId: `${message.gateway}:${message.pattern}`,
+          tags: this.options.ws?.tags,
+          sampling: [
+            "ws",
+            { gateway: message.gateway, pattern: message.pattern },
+          ],
+          record: !this.options.ws?.ignore?.(message),
+        },
+        (operation) => {
+          if (!operation) {
+            return invoke();
           }
-          this.observeAgentSharedBuffer.insertRequestSnapshot(
-            snapshot as RequestSnapshot,
-          );
-        }, 0);
-      };
-
-      // Nest's ws proxy hands a thrown error to the exception filter and
-      // resolves, so there is no rejection to read a failure from here - the
-      // handler's own span records it, and the registry lifts a failed root
-      // span into the snapshot's status.
-      let result: unknown;
-      try {
-        result = invoke();
-      } catch (error) {
-        endTrace();
-        throw error;
-      }
-      if (result instanceof Promise) {
-        return result.finally(endTrace);
-      }
-      endTrace();
-      return result;
+          return this.invokeWithin(operation, message, invoke);
+        },
+      );
     });
+  }
+
+  private invokeWithin(
+    operation: OperationHandle,
+    message: WsMessageContext,
+    invoke: () => unknown,
+  ) {
+    const endTrace = () =>
+      operation.end(() => ({ userId: this.options.ws?.getUserId?.(message) }));
+
+    // Nest's ws proxy hands a thrown error to the exception filter and
+    // resolves, so there is no rejection to read a failure from here - the
+    // handler's own span records it, and the registry lifts a failed root
+    // span into the snapshot's status.
+    let result: unknown;
+    try {
+      result = invoke();
+    } catch (error) {
+      endTrace();
+      throw error;
+    }
+    if (result instanceof Promise) {
+      return result.finally(endTrace);
+    }
+    endTrace();
+    return result;
   }
 }
