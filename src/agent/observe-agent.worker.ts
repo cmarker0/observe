@@ -34,6 +34,19 @@ const DEFAULT_COLLECTOR_ENDPOINT =
   process.env.OBSERVE_ENDPOINT ?? "https://observe-api.nestjs.com";
 const MIN_FLUSH_INTERVAL = 1000; // 1 second
 
+/**
+ * The credentials `nest new --observe` writes into `AppModule`.
+ *
+ * A project fresh from the generator has these until someone signs up, so
+ * they mean "not connected yet", not "wrong": sending them only buys a 401
+ * and an `Error:` line on the very first `npm run start`.
+ */
+const SCAFFOLD_APP_KEY = "YOUR_APP_KEY";
+const SCAFFOLD_APP_SECRET = "YOUR_APP_SECRET";
+
+const DEMO_URL = "https://www.observe-demo.nestjs.com/dashboard";
+const SIGN_UP_URL = "https://observe.nestjs.com";
+
 @Injectable()
 export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(ObserveAgentWorker.name);
@@ -62,7 +75,17 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
   ) {}
 
   onModuleInit() {
-    this.initializeWorker();
+    if (this.hasScaffoldCredentials) {
+      // Nothing is sent, so there is no worker to start. The flush timer below
+      // still runs and empties the buffer, which the instrumentation keeps
+      // writing into either way.
+      this.logger.log(
+        `Observe is installed but not connected yet: appKey and appSecret are still the placeholders from nest new, so no telemetry is sent. ` +
+          `See what this app will look like: ${DEMO_URL} - then create a free account at ${SIGN_UP_URL} for your own key and secret.`,
+      );
+    } else {
+      this.initializeWorker();
+    }
 
     let flushIntervalTime =
       this.options.flushInterval ?? DEFAULT_FLUSH_INTERVAL;
@@ -78,7 +101,9 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
     }
     this.flushInterval = setInterval(() => this.flush(), flushIntervalTime);
 
-    this.startRuntimeMetrics();
+    if (!this.hasScaffoldCredentials) {
+      this.startRuntimeMetrics();
+    }
 
     // Continuous profiling is shelved: a flame graph asks more of a reader than
     // most services' owners want to give it, and the signal is not worth the
@@ -216,6 +241,13 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
     this.worker = null;
   }
 
+  private get hasScaffoldCredentials(): boolean {
+    return (
+      this.options.appKey === SCAFFOLD_APP_KEY &&
+      this.options.appSecret === SCAFFOLD_APP_SECRET
+    );
+  }
+
   private get endpoint(): string {
     return this.options.endpoint ?? DEFAULT_COLLECTOR_ENDPOINT;
   }
@@ -348,6 +380,11 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
     // gone quiet, and an empty buffer would otherwise return here and strand
     // them until shutdown.
     this.observeAgentSharedBuffer.drainPendingLogs();
+
+    if (this.hasScaffoldCredentials) {
+      this.observeAgentSharedBuffer.resetMainThreadBuffer();
+      return;
+    }
 
     if (this.observeAgentSharedBuffer.isBufferEmpty()) {
       return;

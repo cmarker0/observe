@@ -19,7 +19,16 @@ import { ObserveAgentWorker } from "./observe-agent.worker.js";
  */
 describe("ObserveAgentWorker options", () => {
   const collect = vi.fn();
-  const sharedBuffer = { addNodeRuntimeMetrics: vi.fn() };
+  const sharedBuffer = {
+    addNodeRuntimeMetrics: vi.fn(),
+    drainPendingLogs: vi.fn(),
+    resetMainThreadBuffer: vi.fn(),
+    isBufferEmpty: vi.fn(() => false),
+    isBufferLocked: vi.fn(() => false),
+    acquireLock: vi.fn(() => true),
+    encodeAndWrite: vi.fn(),
+    releaseLock: vi.fn(),
+  };
   const metrics = { collectNodeRuntimeMetrics: collect };
 
   let worker: ObserveAgentWorker;
@@ -167,5 +176,72 @@ describe("ObserveAgentWorker options", () => {
     expect(
       (worker as unknown as { cpuProfiler: unknown }).cpuProfiler,
     ).toBeNull();
+  });
+
+  // `nest new --observe` writes these into AppModule. Until someone signs up
+  // they mean "not connected yet": sending them only earns a 401 and an
+  // `Error:` line on the first start, so the agent points at the demo instead.
+  describe("with the credentials nest new generates", () => {
+    const scaffold = {
+      appKey: "YOUR_APP_KEY",
+      appSecret: "YOUR_APP_SECRET",
+      runtimeMetrics: true,
+    };
+
+    const spyLogger = () => {
+      const logger = (
+        worker as unknown as {
+          logger: {
+            log: (m: string) => void;
+            error: (m: string) => void;
+          };
+        }
+      ).logger;
+      return {
+        log: vi.spyOn(logger, "log").mockImplementation(() => undefined),
+        error: vi.spyOn(logger, "error").mockImplementation(() => undefined),
+      };
+    };
+
+    it("points at the demo and sign-up instead of starting the worker", () => {
+      build(scaffold);
+      const { log, error } = spyLogger();
+      worker.onModuleInit();
+
+      expect(worker.initializeWorker).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "https://www.observe-demo.nestjs.com/dashboard",
+        ),
+      );
+      expect(log).toHaveBeenCalledWith(
+        expect.stringContaining("https://observe.nestjs.com"),
+      );
+      expect(error).not.toHaveBeenCalled();
+    });
+
+    it("does not collect runtime metrics nobody will receive", () => {
+      build(scaffold);
+      spyLogger();
+      worker.onModuleInit();
+
+      expect(runtimeMetricsStarted()).toBe(false);
+    });
+
+    it("empties the buffer on flush without handing anything off", () => {
+      build(scaffold).flush();
+
+      expect(sharedBuffer.resetMainThreadBuffer).toHaveBeenCalled();
+      expect(sharedBuffer.encodeAndWrite).not.toHaveBeenCalled();
+    });
+
+    it("starts normally when only one of the two is a placeholder", () => {
+      build({ ...scaffold, appSecret: "real-secret" });
+      const { log } = spyLogger();
+      worker.onModuleInit();
+
+      expect(worker.initializeWorker).toHaveBeenCalled();
+      expect(log).not.toHaveBeenCalled();
+    });
   });
 });
