@@ -2,7 +2,11 @@ import { IntrinsicException } from "@nestjs/common";
 import type * as Otel from "@opentelemetry/api";
 import { AsyncLocalStorage } from "async_hooks";
 import { randomBytes } from "crypto";
-import type { TracerSource } from "../interfaces/observe-options.interface.js";
+import type {
+  LogCorrelation,
+  PropagatorSource,
+  TracerSource,
+} from "../interfaces/observe-options.interface.js";
 import type { TraceSamplerService } from "../services/trace-sampler.service.js";
 import { LogRedactor } from "../utils/log-redactor.js";
 import {
@@ -65,6 +69,32 @@ const OPERATION_KEY = Symbol("nestjs.observe.otel.operation");
 
 type Store = Map<unknown, unknown>;
 
+/** How the recorder is set up - see `CreateObserveModuleOptions.opentelemetry`. */
+export interface OtelRecorderSettings {
+  tracerProvider?: TracerSource;
+  propagator?: PropagatorSource;
+  /** The async-store key log lines and enqueued jobs correlate on. */
+  traceIdKey?: string;
+  logCorrelation?: LogCorrelation;
+}
+
+type Carrier = Record<string, unknown>;
+
+/**
+ * Reads a carrier as transports hand it over: Node folds repeated headers
+ * into arrays, Kafka header values are Buffers.
+ */
+const carrierGetter: Otel.TextMapGetter<Carrier> = {
+  keys: (carrier) => Object.keys(carrier),
+  get: (carrier, key) => fieldValue(carrier[key]),
+};
+
+const carrierSetter: Otel.TextMapSetter<Carrier> = {
+  set: (carrier, key, value) => {
+    carrier[key] = value;
+  },
+};
+
 /**
  * What is current for this recorder, kept beside OTel's own context.
  *
@@ -105,21 +135,26 @@ export class OtelSpanRecorder extends SpanRecorder {
   private readonly operations = new WeakMap<Otel.Span, OtelOperation>();
   /** Spans this recorder started; OTel spans do not expose their name. */
   private readonly names = new WeakMap<Otel.Span, string>();
+  /** The span behind each open `StepHandle`, for `injectContext`. */
+  private readonly steps = new WeakMap<StepHandle, Otel.Span>();
   private readonly tracer: Otel.Tracer;
+  private readonly propagator: PropagatorSource;
   private sampler: TraceSamplerService | undefined;
   private redactor: LogRedactor | null = new LogRedactor();
 
   constructor(
     private readonly als: AsyncLocalStorage<any>,
     private readonly api: OpenTelemetryApi,
-    tracerSource?: TracerSource,
+    private readonly settings: OtelRecorderSettings = {},
   ) {
     super();
     // The global provider is a proxy until the SDK registers, so a tracer
     // taken here still reaches an SDK started after the module is created.
-    this.tracer = (tracerSource ?? api.trace).getTracer(
+    // The global propagator is read per call for the same reason.
+    this.tracer = (settings.tracerProvider ?? api.trace).getTracer(
       TRACER_NAME,
     ) as Otel.Tracer;
+    this.propagator = settings.propagator ?? api.propagation;
   }
 
   attach(redactor: LogRedactor | null, sampler?: TraceSamplerService) {
@@ -135,33 +170,61 @@ export class OtelSpanRecorder extends SpanRecorder {
     const store = this.als.getStore() as Store | undefined;
     store?.delete(OPERATION_KEY);
 
-    // A job starts a trace of its own: whatever context the worker loop
-    // happens to carry is not its cause (propagation from the enqueuing
-    // operation is Phase 3). Any other operation nests under a span another
-    // instrumentation made current - never under one of this recorder's,
-    // which only a context leaked from an earlier operation could hold.
+    // A span another instrumentation made current for this same inbound call
+    // - instrumentation-http's SERVER span, a kafkajs CONSUMER span - already
+    // continued the caller's trace and already is the operation's entry
+    // point. The operation nests under it as INTERNAL rather than repeat it.
+    // Never one of this recorder's own: only a context leaked from an earlier
+    // operation could hold one of those.
     const active = api.trace.getSpan(api.context.active());
-    const parentContext =
-      start.kind === "job" || (active && this.names.has(active))
+    const foreign =
+      start.kind !== "job" && active !== undefined && !this.names.has(active)
+        ? active
+        : undefined;
+
+    // Otherwise the caller's context, if it sent one. A request continues
+    // that trace. A job starts its own and links back: the enqueuer may have
+    // finished long ago, a retry runs again, and whatever the worker loop
+    // happens to carry is not its cause.
+    const remote = foreign ? undefined : this.extract(start.carrier);
+    const parentContext = foreign
+      ? api.context.active()
+      : start.kind === "job"
         ? api.ROOT_CONTEXT
-        : api.context.active();
+        : remote?.context ?? api.ROOT_CONTEXT;
 
     if (start.record === false || !this.shouldCapture(start)) {
-      return this.within(this.unsampled(), parentContext, () => fn(undefined));
+      if (foreign) {
+        return this.beneathForeign(foreign, store, () => fn(undefined));
+      }
+      const inherited =
+        start.kind === "job" ? undefined : remote?.spanContext.traceId;
+      const unsampled = this.unsampled(inherited);
+      this.correlate(store, unsampled);
+      return this.within(unsampled, parentContext, () => fn(undefined));
     }
 
-    const { name, kind, attributes } = describeOperation(api, start);
+    const described = describeOperation(api, start);
     const root = this.tracer.startSpan(
-      name,
-      { kind, attributes, root: parentContext === api.ROOT_CONTEXT },
+      described.name,
+      {
+        kind: foreign ? api.SpanKind.INTERNAL : described.kind,
+        attributes: described.attributes,
+        links:
+          start.kind === "job" && remote
+            ? [{ context: remote.spanContext }]
+            : undefined,
+        root: parentContext === api.ROOT_CONTEXT,
+      },
       parentContext,
     );
+    this.correlate(store, root);
     // The application's own sampler said no.
     if (!root.isRecording()) {
       return this.within(root, parentContext, () => fn(undefined));
     }
 
-    this.names.set(root, name);
+    this.names.set(root, described.name);
     const operation = new OtelOperation(this, root, start);
     this.operations.set(root, operation);
     store?.set(OPERATION_KEY, operation);
@@ -306,6 +369,21 @@ export class OtelSpanRecorder extends SpanRecorder {
     return span?.isRecording() ? span.spanContext().spanId : undefined;
   }
 
+  injectContext(carrier: Record<string, unknown>, step?: StepHandle): void {
+    const span = (step && this.steps.get(step)) ?? this.currentSpan();
+    // Unrecorded, OTel's own context is the one to pass on: this recorder's
+    // unsampled stand-in, or the span of the instrumentation it deferred to.
+    const context = span?.isRecording()
+      ? this.contextUnder(span)
+      : this.api.context.active();
+    try {
+      this.propagator.inject(context, carrier, carrierSetter);
+    } catch {
+      // A propagator that throws costs the downstream service its parent,
+      // not the application its call.
+    }
+  }
+
   getRedactor(): LogRedactor | null {
     return this.redactor;
   }
@@ -388,6 +466,72 @@ export class OtelSpanRecorder extends SpanRecorder {
     return operation?.root ?? active;
   }
 
+  /**
+   * The caller's span context from an inbound carrier, if it holds a valid
+   * one. Carriers come off the wire - headers, packet metadata, job options
+   * in Redis - so the propagator's own validation is all that admits them.
+   */
+  private extract(
+    raw: unknown,
+  ): { context: Otel.Context; spanContext: Otel.SpanContext } | undefined {
+    try {
+      const carrier = toCarrier(raw);
+      if (!carrier) {
+        return undefined;
+      }
+      const context = this.propagator.extract(
+        this.api.ROOT_CONTEXT,
+        carrier,
+        carrierGetter,
+      ) as Otel.Context;
+      const spanContext = this.api.trace.getSpanContext(context);
+      return spanContext && this.api.trace.isSpanContextValid(spanContext)
+        ? { context, spanContext }
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * An unrecorded operation under another instrumentation's span. OTel's
+   * context is left alone - that span stays current, and stays what is
+   * propagated - and only this recorder is told there is nothing to record.
+   */
+  private beneathForeign<T>(
+    foreign: Otel.Span,
+    store: Store | undefined,
+    fn: () => T,
+  ): T {
+    this.correlate(store, foreign);
+    const silent = this.api.trace.wrapSpanContext({
+      ...foreign.spanContext(),
+      traceFlags: this.api.TraceFlags.NONE,
+    });
+    return this.slot.run({ span: silent, base: foreign }, fn);
+  }
+
+  /**
+   * Puts the operation's OTel trace id where log lines and enqueued jobs read
+   * their correlation id, unless the application asked to keep its own. The
+   * id the agent minted or adopted stays on the span as
+   * `nestjs.observe.correlation_id`.
+   */
+  private correlate(store: Store | undefined, span: Otel.Span): void {
+    const key = this.settings.traceIdKey;
+    if (
+      !store ||
+      key === undefined ||
+      this.settings.logCorrelation === "correlation-id"
+    ) {
+      return;
+    }
+    const spanContext = span.spanContext();
+    if (this.api.trace.isSpanContextValid(spanContext)) {
+      store.set(key, spanContext.traceId);
+    }
+  }
+
   private contextUnder(parent: Otel.Span): Otel.Context {
     return this.api.trace.setSpan(this.api.context.active(), parent);
   }
@@ -418,7 +562,7 @@ export class OtelSpanRecorder extends SpanRecorder {
 
   private stepHandle(span: Otel.Span, parent: Otel.Span): StepHandle {
     let ended = false;
-    return {
+    const handle: StepHandle = {
       end: (error?: unknown) => {
         // A driver may report one call twice - a callback and an `error`
         // event, a settled promise and a late listener.
@@ -433,6 +577,8 @@ export class OtelSpanRecorder extends SpanRecorder {
         }
       },
     };
+    this.steps.set(handle, span);
+    return handle;
   }
 
   private endWithError(span: Otel.Span, parent: Otel.Span, error: unknown) {
@@ -476,9 +622,9 @@ export class OtelSpanRecorder extends SpanRecorder {
    * A span context that is valid - so it propagates, telling every service
    * downstream the trace is not sampled - but records nothing.
    */
-  private unsampled(): Otel.Span {
+  private unsampled(traceId?: string): Otel.Span {
     return this.api.trace.wrapSpanContext({
-      traceId: randomBytes(16).toString("hex"),
+      traceId: traceId ?? randomBytes(16).toString("hex"),
       spanId: randomBytes(8).toString("hex"),
       traceFlags: this.api.TraceFlags.NONE,
     });
@@ -722,6 +868,37 @@ function errorType(error: unknown): string | undefined {
     return error.constructor?.name || error.name || "Error";
   }
   return typeof error;
+}
+
+/**
+ * The fields of an inbound carrier: a plain record (headers, packet metadata,
+ * a job's stamped context) or gRPC `Metadata`, read through `getMap()`.
+ */
+function toCarrier(raw: unknown): Carrier | undefined {
+  if (typeof raw !== "object" || raw === null) {
+    return undefined;
+  }
+  const getMap = (raw as { getMap?: unknown }).getMap;
+  if (typeof getMap === "function") {
+    const map: unknown = getMap.call(raw);
+    return typeof map === "object" && map !== null
+      ? (map as Carrier)
+      : undefined;
+  }
+  return raw as Carrier;
+}
+
+function fieldValue(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Buffer.isBuffer(value)) {
+    return value.toString("utf8");
+  }
+  if (Array.isArray(value)) {
+    return fieldValue(value[0]);
+  }
+  return undefined;
 }
 
 function detachedSink(name: string): SpanTagSink {

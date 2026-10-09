@@ -46,6 +46,14 @@ export class OutgoingSpanRecorder {
     return this.spanRecorder.openStep({ className, methodKey }, tags);
   }
 
+  /**
+   * Writes the propagation fields for a call into `carrier`: `span`'s context
+   * when the call has one, the current span's otherwise.
+   */
+  inject(carrier: Record<string, unknown>, span?: OpenOutgoingSpan): void {
+    this.spanRecorder.injectContext(carrier, span);
+  }
+
   /** Runs `fn` with nested entry points told the call is already covered. */
   cover<T>(fn: () => T): T {
     return this.covered.run(true, fn);

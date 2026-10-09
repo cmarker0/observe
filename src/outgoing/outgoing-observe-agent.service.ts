@@ -91,6 +91,7 @@ export class OutgoingObserveAgentService implements OnApplicationShutdown {
         },
         typeof outgoing?.http === "object" ? outgoing.http : {},
         () => spanRecorder.getRedactor(),
+        (carrier, span) => recorder.inject(carrier, span),
       );
     }
   }

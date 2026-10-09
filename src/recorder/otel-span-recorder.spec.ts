@@ -1,6 +1,7 @@
-import { BadRequestException } from "@nestjs/common";
+import { BadRequestException, Logger } from "@nestjs/common";
 import * as api from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
+import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import {
   BasicTracerProvider,
   InMemorySpanExporter,
@@ -8,6 +9,9 @@ import {
   SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 import { AsyncLocalStorage } from "async_hooks";
+import type { ObserveModuleOptionsWithDefaults } from "../interfaces/index.js";
+import { JOB_TRACE_OPTION_KEY } from "../observe.constants.js";
+import { JobTraceRunner } from "../protocols/job-trace-runner.js";
 import { TraceSamplerService } from "../services/trace-sampler.service.js";
 import { LogRedactor } from "../utils/log-redactor.js";
 import { ObserveAttributes, OtelSpanRecorder } from "./otel-span-recorder.js";
@@ -79,7 +83,7 @@ describe("OtelSpanRecorder", () => {
     provider = new BasicTracerProvider({
       spanProcessors: [new SimpleSpanProcessor(exporter)],
     });
-    recorder = new OtelSpanRecorder(als, api, provider);
+    recorder = new OtelSpanRecorder(als, api, { tracerProvider: provider });
     capture = true;
     recorder.attach(new LogRedactor(), {
       shouldCapture: () => capture,
@@ -395,6 +399,8 @@ describe("OtelSpanRecorder", () => {
       await flush();
 
       expect(parentOf(span("GET"))).toBe(idOf(span("incoming")));
+      // That span is the SERVER span already; this one does not repeat it.
+      expect(span("GET").kind).toBe(api.SpanKind.INTERNAL);
     });
 
     it("never nests an operation under one of its own spans", async () => {
@@ -490,6 +496,225 @@ describe("OtelSpanRecorder", () => {
 
       expect(span("manual").attributes.a).toBe(1);
       expect(parentOf(span("Svc.inside"))).toBe(idOf(span("manual")));
+    });
+  });
+
+  describe("propagation", () => {
+    const TRACE = "4bf92f3577b34da6a3ce929d0e0e4736";
+    const PARENT = "00f067aa0ba902b7";
+    const traceparent = (flags = "01") => `00-${TRACE}-${PARENT}-${flags}`;
+
+    beforeEach(() => {
+      recorder = new OtelSpanRecorder(als, api, {
+        tracerProvider: provider,
+        propagator: new W3CTraceContextPropagator(),
+        traceIdKey: TRACE_ID_KEY,
+      });
+      recorder.attach(new LogRedactor(), {
+        shouldCapture: () => capture,
+      } as unknown as TraceSamplerService);
+    });
+
+    /** What the recorder would send downstream from here. */
+    const injected = () => {
+      const carrier: Record<string, unknown> = {};
+      recorder.injectContext(carrier);
+      return carrier.traceparent as string | undefined;
+    };
+
+    it("continues the trace an inbound carrier names, and correlates logs on it", async () => {
+      let correlated: unknown;
+      inStore("req-1", () =>
+        recorder.runOperation(
+          request("req-1", { carrier: { traceparent: traceparent() } }),
+          (operation) => {
+            correlated = als.getStore()!.get(TRACE_ID_KEY);
+            operation!.end();
+          },
+        ),
+      );
+      await flush();
+
+      const root = span("GET");
+      expect(root.kind).toBe(api.SpanKind.SERVER);
+      expect(root.spanContext().traceId).toBe(TRACE);
+      expect(parentOf(root)).toBe(PARENT);
+      expect(correlated).toBe(TRACE);
+      // The id the agent adopted is kept on the span.
+      expect(root.attributes[ObserveAttributes.CORRELATION_ID]).toBe("req-1");
+    });
+
+    it("keeps the agent's correlation id for logs when asked to", () => {
+      recorder = new OtelSpanRecorder(als, api, {
+        tracerProvider: provider,
+        propagator: new W3CTraceContextPropagator(),
+        traceIdKey: TRACE_ID_KEY,
+        logCorrelation: "correlation-id",
+      });
+      inStore("req-1", () =>
+        recorder.runOperation(
+          request("req-1", { carrier: { traceparent: traceparent() } }),
+          (operation) => {
+            expect(als.getStore()!.get(TRACE_ID_KEY)).toBe("req-1");
+            operation!.end();
+          },
+        ),
+      );
+    });
+
+    it("starts a trace of its own for a malformed carrier", async () => {
+      inStore("req-1", () =>
+        recorder.runOperation(
+          request("req-1", { carrier: { traceparent: "00-nope" } }),
+          (operation) => operation!.end(),
+        ),
+      );
+      await flush();
+
+      expect(parentOf(span("GET"))).toBeUndefined();
+      expect(span("GET").spanContext().traceId).not.toBe(TRACE);
+    });
+
+    it("reads gRPC metadata and Kafka's Buffer header values", async () => {
+      const grpc = { getMap: () => ({ traceparent: traceparent() }) };
+      const kafka = { traceparent: Buffer.from(traceparent()) };
+      for (const [protocol, carrier] of [
+        ["GRPC", grpc],
+        ["KAFKA", kafka],
+      ] as const) {
+        inStore("req-1", () =>
+          recorder.runOperation(
+            {
+              kind: "request",
+              correlationId: "req-1",
+              protocol,
+              operationId: protocol,
+              carrier,
+            },
+            (operation) => operation!.end(),
+          ),
+        );
+      }
+      await flush();
+
+      expect(parentOf(span("GRPC"))).toBe(PARENT);
+      expect(parentOf(span("process KAFKA"))).toBe(PARENT);
+    });
+
+    it("keeps the caller's trace when sampled out, and passes the decision on", () => {
+      capture = false;
+      inStore("req-1", () =>
+        recorder.runOperation(
+          request("req-1", { carrier: { traceparent: traceparent() } }),
+          (operation) => {
+            expect(operation).toBeUndefined();
+            expect(als.getStore()!.get(TRACE_ID_KEY)).toBe(TRACE);
+            expect(injected()).toMatch(
+              new RegExp(`^00-${TRACE}-[0-9a-f]{16}-00$`),
+            );
+          },
+        ),
+      );
+    });
+
+    it("leaves another instrumentation's span current for an operation it does not record", async () => {
+      const foreign = provider.getTracer("http").startSpan("incoming");
+      api.context.with(api.trace.setSpan(api.context.active(), foreign), () =>
+        inStore("req-1", () =>
+          recorder.runOperation(
+            request("req-1", { record: false }),
+            (operation) => {
+              expect(operation).toBeUndefined();
+              step("load");
+              expect(injected()).toBe(
+                `00-${foreign.spanContext().traceId}-${foreign.spanContext().spanId}-01`,
+              );
+            },
+          ),
+        ),
+      );
+      foreign.end();
+      await flush();
+
+      expect(spans().map((s) => s.name)).toEqual(["incoming"]);
+    });
+
+    it("sends an outgoing call's own span downstream", async () => {
+      inStore("req-1", () =>
+        recorder.runOperation(request("req-1"), (operation) => {
+          const call = recorder.openStep({
+            className: "http",
+            methodKey: "GET api",
+          })!;
+          const carrier: Record<string, unknown> = {};
+          recorder.injectContext(carrier, call);
+          call.end();
+          const [, traceId, spanId] = (carrier.traceparent as string).split(
+            "-",
+          );
+          expect({ traceId, spanId }).toEqual({
+            traceId: span("http.GET api").spanContext().traceId,
+            spanId: idOf(span("http.GET api")),
+          });
+          operation!.end();
+        }),
+      );
+      await flush();
+    });
+
+    it("links a job to the span that enqueued it, through the job's options", async () => {
+      const runner = new JobTraceRunner(
+        { traceIdKey: TRACE_ID_KEY } as ObserveModuleOptionsWithDefaults,
+        recorder,
+        als as AsyncLocalStorage<Map<never, unknown>>,
+        new Logger("test"),
+      );
+      let stamped: Record<string, unknown> = {};
+      const queue = {
+        add(_name: string, _data: unknown, opts: Record<string, unknown>) {
+          stamped = opts;
+        },
+      };
+      runner.patchEnqueue(queue, () => 2);
+
+      let enqueuer = "";
+      inStore("req-1", () =>
+        recorder.runOperation(request("req-1"), (operation) => {
+          recorder.runStep({ className: "Svc", methodKey: "enqueue" }, () => {
+            enqueuer = recorder.currentSpanId()!;
+            queue.add("send", {}, {});
+          });
+          operation!.end();
+        }),
+      );
+
+      let jobTraceId: unknown;
+      runner.run(
+        { queueName: "mail", name: "send", id: 1, opts: stamped, metadata: {} },
+        () => {
+          jobTraceId = als.getStore()!.get(TRACE_ID_KEY);
+          step("deliver");
+        },
+      );
+      await flush();
+
+      const run = span("process mail");
+      const request_ = span("GET");
+      // A trace of its own, linked back.
+      expect(parentOf(run)).toBeUndefined();
+      expect(run.spanContext().traceId).not.toBe(
+        request_.spanContext().traceId,
+      );
+      expect(run.links.map((link) => link.context.spanId)).toEqual([enqueuer]);
+      // Logs correlate on each operation's own trace; the enqueuer's id is
+      // what the run inherited as its correlation id.
+      expect(stamped[JOB_TRACE_OPTION_KEY]).toBe(
+        request_.spanContext().traceId,
+      );
+      expect(jobTraceId).toBe(run.spanContext().traceId);
+      expect(run.attributes[ObserveAttributes.CORRELATION_ID]).toBe(
+        request_.spanContext().traceId,
+      );
     });
   });
 });

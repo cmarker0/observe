@@ -31,7 +31,7 @@ wait for Phase 5.
 | Provider method step                | INTERNAL span `Class.method`, with `code.function.name`                                                                                                    |
 | Outgoing step (`openStep`)          | INTERNAL span `driver.method` plus the driver's tags                                                                                                       |
 | `setAttributes` tags                | Span attributes on the operation span                                                                                                                      |
-| correlation id                      | `nestjs.observe.correlation_id`. Phase 3 decides whether log correlation moves to the OTel trace id.                                                       |
+| correlation id                      | `nestjs.observe.correlation_id`. Log correlation moved to the OTel trace id in Phase 3 (see `phase-3-notes.md`).                                           |
 | `userId`                            | `enduser.id`                                                                                                                                               |
 
 Attribute names outside semconv are exported as `ObserveAttributes`.

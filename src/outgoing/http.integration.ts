@@ -18,6 +18,10 @@ export interface OutgoingHttpOptions {
    * adopts as its own trace id, which makes HTTP-to-HTTP calls one trace with
    * no application code. A function narrows it to the URLs it returns true
    * for - your own services, say, and not third parties.
+   *
+   * With `opentelemetry`, the span context (W3C `traceparent` by default)
+   * goes along under the same rule, so the downstream service continues this
+   * trace.
    * @default true
    */
   propagateTraceId?: boolean | ((url: string) => boolean);
@@ -67,6 +71,14 @@ export function subscribeOutgoingHttp(
    * after the module's options resolve, which can be after this subscribes.
    */
   getRedactor: () => LogRedactor | null = () => null,
+  /**
+   * Fills in the propagation fields for a request, with the span opened for
+   * it when there is one. Writes nothing without OpenTelemetry.
+   */
+  injectContext: (
+    carrier: Record<string, unknown>,
+    span?: OpenOutgoingSpan,
+  ) => void = () => undefined,
 ): () => void {
   const spans = new WeakMap<object, OpenOutgoingSpan>();
   const subscriptions: Array<[string, (message: unknown) => void]> = [];
@@ -88,6 +100,19 @@ export function subscribeOutgoingHttp(
     typeof options.propagateTraceId === "function"
       ? options.propagateTraceId(url)
       : options.propagateTraceId !== false;
+
+  /** Propagation fields for a request, minus any it already carries. */
+  const contextFields = (
+    has: (name: string) => boolean,
+    span?: OpenOutgoingSpan,
+  ): Array<[string, string]> => {
+    const fields: Record<string, unknown> = {};
+    injectContext(fields, span);
+    return Object.entries(fields).filter(
+      (field): field is [string, string] =>
+        typeof field[1] === "string" && !has(field[0]),
+    );
+  };
 
   const open = (request: object, method: string, url: string, host: string) => {
     if (options.ignore?.(url)) {
@@ -126,6 +151,15 @@ export function subscribeOutgoingHttp(
     ) {
       request.addHeader(TRACE_HEADER, traceId);
     }
+    if (shouldPropagate(url) && typeof request.addHeader === "function") {
+      const fields = contextFields(
+        (name) => hasUndiciHeader(request.headers, name),
+        spans.get(request),
+      );
+      for (const [name, value] of fields) {
+        request.addHeader(name, value);
+      }
+    }
   });
   on<{ request: UndiciRequest }>("undici:request:trailers", ({ request }) =>
     close(request),
@@ -157,6 +191,16 @@ export function subscribeOutgoingHttp(
         !request.getHeader?.(TRACE_HEADER)
       ) {
         request.setHeader?.(TRACE_HEADER, traceId);
+      }
+      // The request's own span opens on `start`, after the headers have
+      // gone, so the downstream service nests under the calling span here.
+      if (!options.ignore?.(url) && shouldPropagate(url)) {
+        const fields = contextFields((name) =>
+          Boolean(request.getHeader?.(name)),
+        );
+        for (const [name, value] of fields) {
+          request.setHeader?.(name, value);
+        }
       }
     },
   );

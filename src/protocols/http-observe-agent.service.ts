@@ -152,6 +152,7 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
             },
           }),
           tags: this.options.http?.tags,
+          carrier: (req as { headers?: unknown }).headers,
           sampling: ["http", { url: req.url, method: req.method }],
           record,
         },

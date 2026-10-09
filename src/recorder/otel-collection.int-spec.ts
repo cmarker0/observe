@@ -12,6 +12,7 @@ import {
 } from "@nestjs/graphql";
 import * as api from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
+import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import {
   BasicTracerProvider,
   InMemorySpanExporter,
@@ -25,7 +26,11 @@ import {
   collectSnapshots,
   testObserveOptions,
 } from "../testing/observe-harness.js";
+import { TracerService } from "../services/tracer.service.js";
 import { ObserveAttributes } from "./otel-span-recorder.js";
+
+/** Where the app listens, for a handler that calls back into it. */
+let baseUrl = "";
 
 const exporter = new InMemorySpanExporter();
 const provider = new BasicTracerProvider({
@@ -55,7 +60,22 @@ class OrdersService {
 
 @Controller()
 class OrdersController {
-  constructor(private readonly orders: OrdersService) {}
+  constructor(
+    private readonly orders: OrdersService,
+    private readonly tracer: TracerService,
+  ) {}
+
+  @Get("trace-id")
+  traceId() {
+    return { traceId: this.tracer.currentTraceId() };
+  }
+
+  /** One service calling another - here, itself. */
+  @Get("chain")
+  async chain() {
+    const response = await fetch(`${baseUrl}/orders`);
+    return response.json();
+  }
 
   @Get("orders")
   findAll() {
@@ -142,17 +162,20 @@ describe("ObserveModule: OpenTelemetry recording", () => {
     api.context.setGlobalContextManager(
       new AsyncLocalStorageContextManager().enable(),
     );
+    api.propagation.setGlobalPropagator(new W3CTraceContextPropagator());
     app = await NestFactory.create<NestExpressApplication>(OtelTestModule, {
       instrument: ObserveInstrument,
       logger: false,
     });
     collected = collectSnapshots(app);
-    await app.init();
+    await app.listen(0, "127.0.0.1");
+    baseUrl = await app.getUrl();
   });
 
   afterAll(async () => {
     await app?.close();
     api.context.disable();
+    api.propagation.disable();
   });
 
   beforeEach(() => {
@@ -230,5 +253,35 @@ describe("ObserveModule: OpenTelemetry recording", () => {
     expect(root.attributes["http.response.status_code"]).toBe(200);
     expect(root.attributes[ObserveAttributes.STATUS_CODE]).toBe(500);
     expect(root.status.code).toBe(api.SpanStatusCode.ERROR);
+  });
+
+  it("continues the trace a caller sent, and correlates on its trace id", async () => {
+    const trace = "4bf92f3577b34da6a3ce929d0e0e4736";
+    const { body } = await request(app.getHttpServer())
+      .get("/trace-id")
+      .set("traceparent", `00-${trace}-00f067aa0ba902b7-01`)
+      .set("x-request-id", "edge-42")
+      .expect(200);
+
+    const spans = await traceOf("GET /trace-id");
+    const root = named(spans, "GET /trace-id");
+    expect(root.spanContext().traceId).toBe(trace);
+    expect(parentOf(root)).toBe("00f067aa0ba902b7");
+    // What logs and `currentTraceId()` see is the trace's id; the proxy's
+    // request id stays on the span.
+    expect(body).toEqual({ traceId: trace });
+    expect(root.attributes[ObserveAttributes.CORRELATION_ID]).toBe("edge-42");
+  });
+
+  it("keeps a call from one service to another in one trace", async () => {
+    await request(app.getHttpServer()).get("/chain").expect(200);
+
+    const spans = await traceOf("GET /chain");
+    const outgoing = spans.find((span) => span.name.startsWith("http.GET "));
+    expect(outgoing, "outgoing call span").toBeDefined();
+    // The downstream SERVER span nests under the call that reached it.
+    const downstream = named(spans, "GET /orders");
+    expect(downstream.kind).toBe(api.SpanKind.SERVER);
+    expect(parentOf(downstream)).toBe(idOf(outgoing!));
   });
 });
