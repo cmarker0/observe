@@ -172,13 +172,11 @@ export function createObserveModule<Store extends Record<string, unknown>>(
   // needs it before the DI container exists.
   const spanRecorder: RegistrySpanRecorder | OtelSpanRecorder =
     options.opentelemetry
-      ? new OtelSpanRecorder(
-          asyncLocalStorage,
-          loadOpenTelemetryApi(),
-          typeof options.opentelemetry === "object"
-            ? options.opentelemetry.tracerProvider
-            : undefined,
-        )
+      ? new OtelSpanRecorder(asyncLocalStorage, loadOpenTelemetryApi(), {
+          ...(typeof options.opentelemetry === "object" &&
+            options.opentelemetry),
+          traceIdKey: options.traceIdKey,
+        })
       : new RegistrySpanRecorder(
           asyncLocalStorage,
           operationTraceRegistry,
@@ -437,8 +435,11 @@ export function createObserveModule<Store extends Record<string, unknown>>(
           skipInstrumentation,
         });
         return (instance: unknown) => {
-          propagateTraceIdThrough(instance, () =>
-            asyncLocalStorage.getStore()?.get(options.traceIdKey as never),
+          propagateTraceIdThrough(
+            instance,
+            () =>
+              asyncLocalStorage.getStore()?.get(options.traceIdKey as never),
+            spanRecorder,
           );
           return decorate(instance as never);
         };
@@ -455,11 +456,14 @@ export function createObserveModule<Store extends Record<string, unknown>>(
  * processing hooks, and only exists on `@nestjs/microservices` versions that
  * carry packet metadata - so this is a feature test, and a no-op on every
  * version before. The id goes out under the same name an HTTP hop uses, and
- * `defaultTraceIdGenerator` reads it back from the receiving context.
+ * `defaultTraceIdGenerator` reads it back from the receiving context. With
+ * OpenTelemetry the span context rides along, for the receiving agent's
+ * `OperationStart.carrier`.
  */
 function propagateTraceIdThrough(
   instance: unknown,
   currentTraceId: () => unknown,
+  spanRecorder: SpanRecorder,
 ): void {
   const client = instance as {
     setOnDispatchHook?: (
@@ -479,6 +483,15 @@ function propagateTraceIdThrough(
     const traceId = currentTraceId();
     if (typeof traceId === "string" && !packet.metadata?.["x-request-id"]) {
       packet.metadata = { ...packet.metadata, "x-request-id": traceId };
+    }
+    // The span context too, when there is one to carry. A field the caller
+    // set on the packet itself is left as it is.
+    const fields: Record<string, unknown> = {};
+    spanRecorder.injectContext(fields);
+    for (const [key, value] of Object.entries(fields)) {
+      if (typeof value === "string" && packet.metadata?.[key] === undefined) {
+        packet.metadata = { ...packet.metadata, [key]: value };
+      }
     }
   });
 }

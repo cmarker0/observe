@@ -50,6 +50,13 @@ export interface OperationStart {
   attributes?: { method?: string; originalUrl?: string };
   /** Job runs only: queue, name, id and driver metadata. */
   job?: Partial<JobSnapshot>;
+  /**
+   * The inbound fields a caller's trace context may ride in: HTTP headers,
+   * packet or gRPC metadata, the context stamped on a job when it was
+   * enqueued. A request continues that trace; a job links to it. Read only by
+   * recorders that propagate - see `injectContext`.
+   */
+  carrier?: unknown;
   /** Omitted for operations `tracesSampleRate` does not apply to (jobs). */
   sampling?: SamplingInput;
   /**
@@ -184,6 +191,18 @@ export abstract class SpanRecorder {
   abstract captureError(error: Error, tags?: Tags): void;
 
   // --- correlation and shared helpers -------------------------------------
+
+  /**
+   * Writes the current trace context into `carrier` - outgoing HTTP headers,
+   * packet metadata, a job's options - for the receiving side's
+   * `OperationStart.carrier`. With `step`, the context is that step's, so the
+   * receiver nests under the outgoing call rather than beside it. Writes
+   * nothing when the recorder has no context of its own to propagate.
+   */
+  abstract injectContext(
+    carrier: Record<string, unknown>,
+    step?: StepHandle,
+  ): void;
 
   /** The current span id, for a log line written inside it. */
   abstract currentSpanId(): string | undefined;

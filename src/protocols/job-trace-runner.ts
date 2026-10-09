@@ -5,7 +5,10 @@ import {
   JobSnapshot,
   ObserveModuleOptionsWithDefaults,
 } from "../interfaces/index.js";
-import { JOB_TRACE_OPTION_KEY } from "../observe.constants.js";
+import {
+  JOB_TRACE_CONTEXT_OPTION_KEY,
+  JOB_TRACE_OPTION_KEY,
+} from "../observe.constants.js";
 import { OperationHandle, SpanRecorder } from "../recorder/span-recorder.js";
 import { KeyOf } from "../types/key-of.type.js";
 import { REQUEST_ID_PATTERN } from "../utils/default-trace-id-generator.util.js";
@@ -136,8 +139,9 @@ export class JobTraceRunner<Store extends Record<string, unknown>> {
   }
 
   /**
-   * Returns the options with the active trace id added, or `undefined` when
-   * there is nothing to add.
+   * Returns the options with the active trace id - and, with OpenTelemetry,
+   * the active span context - added, or `undefined` when there is nothing to
+   * add.
    *
    * A repeatable job is left alone: every repetition would otherwise report
    * under the one request that happened to register the schedule, for as long
@@ -158,7 +162,17 @@ export class JobTraceRunner<Store extends Record<string, unknown>> {
     if (current["repeat"] || current[JOB_TRACE_OPTION_KEY] !== undefined) {
       return undefined;
     }
-    return { ...current, [JOB_TRACE_OPTION_KEY]: traceId };
+    const stamped: Record<string, unknown> = {
+      ...current,
+      [JOB_TRACE_OPTION_KEY]: traceId,
+    };
+    // The enqueuing span, for the run to link to - when the recorder has one.
+    const context: Record<string, unknown> = {};
+    this.spanRecorder.injectContext(context);
+    if (Object.keys(context).length > 0) {
+      stamped[JOB_TRACE_CONTEXT_OPTION_KEY] = context;
+    }
+    return stamped;
   }
 
   /**
@@ -278,6 +292,7 @@ export class JobTraceRunner<Store extends Record<string, unknown>> {
           correlationId: traceId,
           tags: this.options.jobs?.tags,
           job: { ...context, ...job.metadata },
+          carrier: job.opts?.[JOB_TRACE_CONTEXT_OPTION_KEY],
           // An ignored run keeps its trace id in the store, so logs and jobs
           // enqueued from here still correlate; it just records nothing.
           record: !this.isIgnored(context),

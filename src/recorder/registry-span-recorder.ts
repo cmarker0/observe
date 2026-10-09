@@ -278,6 +278,11 @@ export class RegistrySpanRecorder extends SpanRecorder {
     return store?.get(CALLER_METADATA_KEY) as string | undefined;
   }
 
+  injectContext(): void {
+    // Snapshots correlate on the trace id alone, which callers already send
+    // as `x-request-id`; there is no span context to carry.
+  }
+
   getRedactor(): LogRedactor | null {
     return this.registry.getRedactor();
   }

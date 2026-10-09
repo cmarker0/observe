@@ -18,3 +18,11 @@ export const TRACE_REGISTRY_KEY = "#registryKey";
  * through Redis without touching the job's data.
  */
 export const JOB_TRACE_OPTION_KEY = "observeTraceId";
+
+/**
+ * The job option the enqueuing span's propagation fields (W3C `traceparent`
+ * and the like) are stamped into, when recording through OpenTelemetry. A
+ * run links to that span. Kept beside `JOB_TRACE_OPTION_KEY` rather than in
+ * place of it: the id still correlates the run's log lines.
+ */
+export const JOB_TRACE_CONTEXT_OPTION_KEY = "observeTraceContext";

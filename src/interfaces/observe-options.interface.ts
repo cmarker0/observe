@@ -65,6 +65,29 @@ export interface TracerSource {
   getTracer(name: string, version?: string): unknown;
 }
 
+/**
+ * An OpenTelemetry `TextMapPropagator`, typed loosely so this file does not
+ * need `@opentelemetry/api`, an optional peer.
+ */
+export interface PropagatorSource {
+  inject(context: unknown, carrier: unknown, setter: unknown): void;
+  extract(context: unknown, carrier: unknown, getter: unknown): unknown;
+}
+
+/**
+ * What goes under `traceIdKey` - into log lines, `x-request-id` on outgoing
+ * calls and the id stamped on enqueued jobs - when recording through
+ * OpenTelemetry.
+ *
+ * - `"trace-id"`: the operation's OTel trace id, so a log line joins the
+ *   spans of its trace in any backend.
+ * - `"correlation-id"`: the id `traceIdGenerator` returned (an adopted
+ *   `x-request-id` or a fresh UUIDv7), as without OpenTelemetry. Keeps
+ *   existing log queries working; logs and spans then join only through the
+ *   span's `nestjs.observe.correlation_id` attribute.
+ */
+export type LogCorrelation = "trace-id" | "correlation-id";
+
 export interface CreateObserveModuleOptions {
   /**
    * The trace ID key used to identify the trace in the context.
@@ -171,13 +194,32 @@ export interface CreateObserveModuleOptions {
    * decision to every span beneath it. `skipSpans`, `spanCollapse` and
    * `sourceContext` apply to snapshots only and are ignored here.
    *
-   * Pass `{ tracerProvider }` to use a provider other than the global one.
+   * Trace context is propagated with the global propagator (the SDK
+   * registers W3C `traceparent` by default):
+   * - Extracted from inbound HTTP headers, microservice packet metadata,
+   *   Kafka headers and gRPC metadata. The operation continues that trace.
+   * - Injected into outgoing HTTP requests (with `outgoing.http`),
+   *   microservice packets and enqueued jobs. A job run starts a trace of its
+   *   own with a link to the enqueuing span.
+   * - When another instrumentation (`instrumentation-http`, say) already
+   *   opened a span for the inbound call, the operation nests under it as an
+   *   INTERNAL span instead of repeating the SERVER span. Its outgoing
+   *   counterparts (`instrumentation-http`, `-undici`) duplicate
+   *   `outgoing.http`; switch one of them off.
+   *
+   * Options:
+   * - `tracerProvider`: a provider other than the global one.
+   * - `propagator`: a propagator other than the global one.
+   * - `logCorrelation`: what log lines correlate on - see `LogCorrelation`.
+   *   Defaults to `"trace-id"`.
    * @default false
    */
   opentelemetry?:
     | boolean
     | {
         tracerProvider?: TracerSource;
+        propagator?: PropagatorSource;
+        logCorrelation?: LogCorrelation;
       };
 }
 

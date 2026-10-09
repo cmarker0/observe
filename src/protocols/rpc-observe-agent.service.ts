@@ -185,6 +185,7 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
             operationId: this.getOperationIdFromContext(ctx),
           }),
           tags: this.options.rpc?.tags,
+          carrier: rpcCarrierOf(ctx),
           sampling: ["rpc", { transport: transportId.toString(), ctx }],
           record,
         },
@@ -223,6 +224,7 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
                 protocol: this.toProtocolName(transportId),
                 operationId: call.operationId,
                 tags: this.options.grpc?.tags,
+                carrier: call.metadata,
                 sampling: ["grpc", { call }],
                 record: !this.options.grpc?.ignore?.(call),
               },
@@ -281,5 +283,24 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
         return typeof pattern === "string" ? pattern : "unknown";
       }
     }
+  }
+}
+
+/**
+ * Where a caller's trace context rides on a microservice message: the packet
+ * metadata Nest's clients send (and the module's dispatch hook writes), or
+ * Kafka's own message headers, which a non-Nest producer or
+ * `instrumentation-kafkajs` writes to.
+ */
+function rpcCarrierOf(ctx: BaseRpcContext): unknown {
+  try {
+    const metadata = (ctx as { getMetadata?: () => unknown }).getMetadata?.();
+    if (typeof metadata === "object" && metadata !== null) {
+      return metadata;
+    }
+    const message = (ctx as { getMessage?: () => unknown }).getMessage?.();
+    return (message as { headers?: unknown } | undefined)?.headers;
+  } catch {
+    return undefined;
   }
 }
