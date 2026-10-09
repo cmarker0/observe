@@ -4,6 +4,7 @@ export * from "./interfaces/index.js";
 export * from "./observe.constants.js";
 export * from "./objectives/index.js";
 export * from "./observe.module.js";
+export { ObserveAttributes } from "./recorder/otel-span-recorder.js";
 export * from "./services/index.js";
 export * from "./trace-span.delegate.js";
 export * from "./types/key-of.type.js";
