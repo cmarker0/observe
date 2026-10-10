@@ -274,14 +274,16 @@ describe("ObserveModule: GraphQL over OpenTelemetry", () => {
         "    INTERNAL OrdersService.list",
       ].join("\n"),
     );
-    expect(spanNamed(trace, "POST").attributes).toMatchObject({
+    const root = spanNamed(trace, "POST");
+    expect(root.attributes).toMatchObject({
       "graphql.operation.type": "query",
-      "graphql.operation.name": "latestOrders",
       [ObserveAttributes.OPERATION_ID]: "Query.latestOrders",
       "graphql.document": "{ latestOrders { id } }",
       "http.request.method": "POST",
       "url.path": "/graphql",
     });
+    // An anonymous operation has no name; the root field is not one.
+    expect(root.attributes).not.toHaveProperty("graphql.operation.name");
   });
 
   it("records a named mutation with its document sanitised", async () => {
@@ -298,12 +300,13 @@ describe("ObserveModule: GraphQL over OpenTelemetry", () => {
       ].join("\n"),
     );
     const root = spanNamed(trace, "POST");
-    // `graphql.operation.name` is the root field, not the document's
-    // operation name (see phase-2-notes.md); the name stays in the document,
-    // the inline literal does not.
+    // `graphql.operation.name` is the document's name for the operation, as
+    // semantic conventions have it; the root field is in the operation id.
+    // The inline literal stays out of the document.
     expect(root.attributes).toMatchObject({
       "graphql.operation.type": "mutation",
-      "graphql.operation.name": "createOrder",
+      "graphql.operation.name": "CreateOrder",
+      [ObserveAttributes.OPERATION_ID]: "Mutation.createOrder",
       "graphql.document":
         "mutation CreateOrder { createOrder(name: _) { id } }",
     });
@@ -485,6 +488,18 @@ describe("ObserveModule: GraphQL over OpenTelemetry", () => {
     });
   });
 
+  it("opens no step for a document with a syntax error", async () => {
+    // The scan labels `Query.orders` from the first field; the unclosed
+    // selection after it is what `graphql` rejects, and no resolver runs.
+    await gql("{ orders { id }").expect(400);
+
+    const trace = await spans.traceOf("POST");
+    expect(spanTree(trace)).toBe("SERVER POST");
+    const root = spanNamed(trace, "POST");
+    expect(root.attributes["http.response.status_code"]).toBe(400);
+    expect(root.attributes).not.toHaveProperty(ObserveAttributes.OPERATION_ID);
+  });
+
   it("keeps concurrent operations' spans in their own traces", async () => {
     // Started together, finishing in reverse order, each calling providers
     // both before and after it yields - including a failing field and a
@@ -608,7 +623,7 @@ describe("ObserveModule: GraphQL over OpenTelemetry", () => {
       .instance;
     await Promise.all([
       apollo.executeOperation({
-        query: "{ slowOrder(id: 1, delayMs: 30) { id total } }",
+        query: "query SlowOrder { slowOrder(id: 1, delayMs: 30) { id total } }",
       }),
       apollo.executeOperation({
         query: "{ allOrders { id customer { id } } }",
@@ -636,8 +651,11 @@ describe("ObserveModule: GraphQL over OpenTelemetry", () => {
     expect(rootOf(slow).attributes).toMatchObject({
       [ObserveAttributes.PROTOCOL]: "graphql",
       "graphql.operation.type": "query",
-      "graphql.operation.name": "slowOrder",
+      "graphql.operation.name": "SlowOrder",
     });
+    expect(rootOf(all).attributes).not.toHaveProperty(
+      "graphql.operation.name",
+    );
     expect(spans.finished.some((span) => span.name === "POST")).toBe(false);
   });
 

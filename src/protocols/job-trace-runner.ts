@@ -19,12 +19,17 @@ export interface JobRunDescriptor {
   queueName: string;
   name: string;
   id?: string | number;
+  /** The driver, as `messaging.system` names it; absent for `@Cron` runs. */
+  system?: string;
   /** The job's options as the driver read them back from Redis. */
   opts?: Record<string, unknown>;
   metadata: Partial<JobSnapshot>;
 }
 
 type JobStatus = NonNullable<JobSnapshot["status"]>;
+
+/** Ends a run; `error` is why it failed, when the driver was told. */
+type JobSettle = (status: JobStatus, error?: unknown) => void;
 
 /** The slice of a queue's prototype the enqueue patch touches. */
 interface QueuePrototypeLike {
@@ -223,13 +228,13 @@ export class JobTraceRunner<Store extends Record<string, unknown>> {
    * Runs one job under a trace.
    *
    * `invoke` is handed `settle` for drivers whose handlers finish through a
-   * callback; pass `settlesItself` for those, and a plain return is then not
+   * callback - with the error the callback was given, when it failed; pass `settlesItself` for those, and a plain return is then not
    * read as completion. Promise-returning and throwing handlers are settled
    * here either way.
    */
   run<T>(
     job: JobRunDescriptor,
-    invoke: (settle: (status: JobStatus) => void) => T,
+    invoke: (settle: JobSettle) => T,
     settlesItself = false,
   ): T {
     const outerStore = this.asyncLocalStorage.getStore();
@@ -292,6 +297,7 @@ export class JobTraceRunner<Store extends Record<string, unknown>> {
           correlationId: traceId,
           tags: this.options.jobs?.tags,
           job: { ...context, ...job.metadata },
+          messagingSystem: job.system,
           carrier: job.opts?.[JOB_TRACE_CONTEXT_OPTION_KEY],
           // An ignored run keeps its trace id in the store, so logs and jobs
           // enqueued from here still correlate; it just records nothing.
@@ -309,16 +315,16 @@ export class JobTraceRunner<Store extends Record<string, unknown>> {
 
   private invokeWithin<T>(
     operation: OperationHandle,
-    invoke: (settle: (status: JobStatus) => void) => T,
+    invoke: (settle: JobSettle) => T,
     settlesItself: boolean,
   ): T {
     let settled = false;
-    const settle = (status: JobStatus) => {
+    const settle: JobSettle = (status, error) => {
       if (settled) {
         return;
       }
       settled = true;
-      operation.end(() => ({ status }));
+      operation.end(() => ({ status, error }));
     };
 
     try {
@@ -330,7 +336,7 @@ export class JobTraceRunner<Store extends Record<string, unknown>> {
             return ret;
           })
           .catch((error: Error) => {
-            settle("failed");
+            settle("failed", error);
             throw error;
           }) as T;
       }
@@ -340,7 +346,7 @@ export class JobTraceRunner<Store extends Record<string, unknown>> {
       }
       return returnValue;
     } catch (error) {
-      settle("failed");
+      settle("failed", error);
       throw error;
     }
   }

@@ -1,5 +1,7 @@
+import { parse } from "graphql";
 import {
   clearGraphQLOperationCache,
+  createSyntaxCheck,
   graphQLOperationCacheSize,
   parseGraphQLOperation,
   toResolveInfoLike,
@@ -244,5 +246,28 @@ describe("toResolveInfoLike", () => {
       toResolveInfoLike({ rootTypeName: "Query", fieldName: "orders" })
         .operation,
     ).toEqual({ operation: "query", name: undefined });
+  });
+});
+
+describe("createSyntaxCheck", () => {
+  it("rejects what the scan would still label", () => {
+    const isWellFormed = createSyntaxCheck(parse);
+
+    expect(parseGraphQLOperation("{ orders { id }")).toMatchObject({
+      fieldName: "orders",
+    });
+    expect(isWellFormed("{ orders { id }")).toBe(false);
+    expect(isWellFormed("query Recent { orders { id } }")).toBe(true);
+  });
+
+  it("parses each document once", () => {
+    const counted = vi.fn(parse);
+    const isWellFormed = createSyntaxCheck(counted);
+
+    for (let i = 0; i < 3; i++) {
+      isWellFormed("{ orders { id } }");
+      isWellFormed("{ orders { id }");
+    }
+    expect(counted).toHaveBeenCalledTimes(2);
   });
 });

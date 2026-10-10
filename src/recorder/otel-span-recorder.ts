@@ -394,8 +394,17 @@ export class OtelSpanRecorder extends SpanRecorder {
     // reads it, so hooks like `getUserId` see the request as it finished.
     const endTime = performance.timeOrigin + performance.now();
     setTimeout(() => {
-      const { statusCode, userId, status } = outcome();
+      const { statusCode, userId, status, error } = outcome();
       const { root, start } = operation;
+      // A thrown error is on the step that threw; one only the driver saw
+      // (`done(err)`) has no span yet, and the run is where it belongs.
+      const reported =
+        error !== undefined && error !== null && error !== operation.rootError
+          ? error
+          : undefined;
+      if (reported !== undefined) {
+        this.recordError(root, reported);
+      }
       if (userId !== undefined) {
         root.setAttribute("enduser.id", userId);
       }
@@ -415,20 +424,32 @@ export class OtelSpanRecorder extends SpanRecorder {
         );
       }
 
+      const grpcStatus = isGrpc(start) ? grpcStatusOf(rootError) : undefined;
+      if (grpcStatus !== undefined) {
+        root.setAttribute("rpc.grpc.status_code", grpcStatus);
+      }
+
       // Over HTTP a 4xx is the client's failure, not the server's: semantic
-      // conventions leave the status unset for it. Elsewhere an error that
-      // escaped the handler failed the operation, raised on purpose or not.
+      // conventions leave the status unset for it, and likewise for the gRPC
+      // codes that answer a bad request (`NOT_FOUND`, `INVALID_ARGUMENT`).
+      // Elsewhere an error that escaped the handler failed the operation,
+      // raised on purpose or not.
       const failed = isHttp(start)
         ? classified !== undefined && classified >= 500
-        : rootError !== undefined ||
-          status === "failed" ||
-          (classified !== undefined && classified >= 500);
+        : grpcStatus !== undefined
+          ? GRPC_SERVER_ERRORS.has(grpcStatus)
+          : rootError !== undefined ||
+            status === "failed" ||
+            (classified !== undefined && classified >= 500);
       if (failed) {
         root.setAttribute(
           "error.type",
-          errorType(rootError) ?? status ?? String(classified),
+          errorType(rootError ?? reported) ?? status ?? String(classified),
         );
-        root.setStatus({ code: this.api.SpanStatusCode.ERROR });
+        // `recordError` has already set it, with the message.
+        if (reported === undefined) {
+          root.setStatus({ code: this.api.SpanStatusCode.ERROR });
+        }
       }
       root.end(endTime);
     }, 0);
@@ -703,6 +724,7 @@ class OtelOperation implements OperationHandle {
 
   annotate(update: {
     operationId: string;
+    operationName?: string;
     tags?: Tags;
     attributes?: { originalUrl?: string };
   }): void {
@@ -711,7 +733,9 @@ class OtelOperation implements OperationHandle {
     }
     if (!this.hasOperationId) {
       this.hasOperationId = true;
-      this.root.setAttributes(graphqlAttributes(update.operationId));
+      this.root.setAttributes(
+        graphqlAttributes(update.operationId, update.operationName),
+      );
     }
     if (update.tags) {
       this.root.setAttributes(update.tags);
@@ -764,6 +788,7 @@ function describeOperation(
     Object.assign(
       attributes,
       definedOnly({
+        "messaging.system": start.messagingSystem,
         "messaging.operation.type": "process",
         "messaging.destination.name": job.queueName,
         "messaging.message.id": job.id,
@@ -801,7 +826,7 @@ function describeOperation(
   if (protocol === "graphql") {
     Object.assign(
       attributes,
-      operationId ? graphqlAttributes(operationId) : {},
+      operationId ? graphqlAttributes(operationId, start.operationName) : {},
       definedOnly({ "graphql.document": start.attributes?.originalUrl }),
     );
     return {
@@ -874,6 +899,42 @@ function httpRpcMetadata(context: Otel.Context): RpcMetadata | undefined {
   return metadata?.type === RPC_TYPE_HTTP ? metadata : undefined;
 }
 
+function isGrpc(start: OperationStart): boolean {
+  return start.kind === "request" && start.protocol === "GRPC";
+}
+
+/** gRPC's `OK` and `UNKNOWN` status codes. */
+const GRPC_OK = 0;
+const GRPC_UNKNOWN = 2;
+
+/**
+ * The codes semantic conventions count as the server's failure: `UNKNOWN`,
+ * `DEADLINE_EXCEEDED`, `UNIMPLEMENTED`, `INTERNAL`, `UNAVAILABLE` and
+ * `DATA_LOSS`. The rest answer the client's request.
+ */
+const GRPC_SERVER_ERRORS = new Set([2, 4, 12, 13, 14, 15]);
+
+/**
+ * The status code a gRPC call was answered with, from the error that escaped
+ * its handler - Nest's end hook is handed only the request. An
+ * `RpcException({ code })`, or an error carrying grpc-js's numeric `code`,
+ * answers with that code; anything else reaches the client as `UNKNOWN`, the
+ * way grpc-js sends an error without one.
+ */
+function grpcStatusOf(error: unknown): number {
+  if (error === undefined) {
+    return GRPC_OK;
+  }
+  const payload = (error as { getError?: () => unknown }).getError?.();
+  for (const source of [payload, error]) {
+    const code = (source as { code?: unknown } | null | undefined)?.code;
+    if (typeof code === "number" && Number.isInteger(code) && code >= 0 && code <= 16) {
+      return code;
+    }
+  }
+  return GRPC_UNKNOWN;
+}
+
 function isHttp(start: OperationStart): boolean {
   return (
     start.kind === "request" &&
@@ -881,13 +942,21 @@ function isHttp(start: OperationStart): boolean {
   );
 }
 
-function graphqlAttributes(operationId: string): Otel.Attributes {
-  const [rootType, field] = operationId.split(".");
+/**
+ * `graphql.operation.name` is the name the document gave the operation, as
+ * semantic conventions define it - not the root field, which `operationId`
+ * (`Mutation.createOrder`) already carries. An anonymous operation has none.
+ */
+function graphqlAttributes(
+  operationId: string,
+  operationName: string | undefined,
+): Otel.Attributes {
+  const [rootType] = operationId.split(".");
   const type = GRAPHQL_ROOT_TYPES[rootType];
   return {
     [ObserveAttributes.OPERATION_ID]: operationId,
     ...(type && { "graphql.operation.type": type }),
-    ...(field && { "graphql.operation.name": field }),
+    ...(operationName && { "graphql.operation.name": operationName }),
   };
 }
 

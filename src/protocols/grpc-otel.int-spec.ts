@@ -8,8 +8,13 @@ import {
   Module,
 } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
-import { GrpcMethod, Transport } from "@nestjs/microservices";
-import { credentials, loadPackageDefinition, Metadata } from "@grpc/grpc-js";
+import { GrpcMethod, RpcException, Transport } from "@nestjs/microservices";
+import {
+  credentials,
+  loadPackageDefinition,
+  Metadata,
+  status,
+} from "@grpc/grpc-js";
 import { loadSync } from "@grpc/proto-loader";
 import * as api from "@opentelemetry/api";
 import { createObserveModule } from "../observe.module.js";
@@ -93,6 +98,17 @@ class OrdersGrpcController {
   async rejectAsync(): Promise<never> {
     await new Promise((resolve) => setTimeout(resolve, 5));
     throw new BadRequestException("rejected");
+  }
+
+  /** The way a Nest gRPC service answers with a status of its choosing. */
+  @GrpcMethod("Orders", "Missing")
+  missing(): never {
+    throw new RpcException({ code: status.NOT_FOUND, message: "no order" });
+  }
+
+  @GrpcMethod("Orders", "Unavailable")
+  unavailable(): never {
+    throw new RpcException({ code: status.UNAVAILABLE, message: "draining" });
   }
 }
 
@@ -197,6 +213,7 @@ describe("ObserveModule with OpenTelemetry: gRPC", () => {
     expect(root.attributes).toMatchObject({
       "rpc.system": "grpc",
       "rpc.method": "FindOne",
+      "rpc.grpc.status_code": status.OK,
       [ObserveAttributes.PROTOCOL]: "GRPC",
       [ObserveAttributes.OPERATION_ID]: "FindOne",
     });
@@ -250,7 +267,11 @@ describe("ObserveModule with OpenTelemetry: gRPC", () => {
    * processing-end hook from `error` since @nestjs/microservices 11.1.29).
    */
   it("fails a call whose handler threw, with the error redacted", async () => {
-    await expect(call("Explode", { id: "9" })).rejects.toBeDefined();
+    // Nest answers an error that is not an RpcException without a code,
+    // which grpc-js sends as UNKNOWN.
+    await expect(call("Explode", { id: "9" })).rejects.toMatchObject({
+      code: status.UNKNOWN,
+    });
 
     const trace = await spans.traceOf("orderstest.Orders/Explode");
     expect(spanTree(trace)).toBe(
@@ -266,6 +287,7 @@ describe("ObserveModule with OpenTelemetry: gRPC", () => {
       [ObserveAttributes.STATUS_CODE]: 500,
       [ObserveAttributes.ERROR_HANDLED]: false,
       "error.type": "Error",
+      "rpc.grpc.status_code": status.UNKNOWN,
     });
 
     const handler = spanNamed(trace, "OrdersGrpcController.explode");
@@ -310,6 +332,33 @@ describe("ObserveModule with OpenTelemetry: gRPC", () => {
     expect(crashed.attributes[ObserveAttributes.STATUS_CODE]).toBe(500);
     expect(rejected.status.code).toBe(api.SpanStatusCode.ERROR);
     expect(rejected.attributes[ObserveAttributes.STATUS_CODE]).toBe(400);
+  });
+
+  /**
+   * The status the client received, read off the error that escaped the
+   * handler. Semantic conventions count only the server's own failures
+   * against a SERVER span; a code that answers the request - `NOT_FOUND` -
+   * leaves it unset, as a 4xx does over HTTP.
+   */
+  it("records the status code an RpcException answered with", async () => {
+    await expect(call("Missing", { id: "9" })).rejects.toMatchObject({
+      code: status.NOT_FOUND,
+    });
+    await expect(call("Unavailable", { id: "9" })).rejects.toMatchObject({
+      code: status.UNAVAILABLE,
+    });
+
+    const missing = await operationNamed("orderstest.Orders/Missing");
+    expect(missing.attributes["rpc.grpc.status_code"]).toBe(status.NOT_FOUND);
+    expect(missing.status.code).toBe(api.SpanStatusCode.UNSET);
+    expect(missing.attributes).not.toHaveProperty("error.type");
+
+    const unavailable = await operationNamed("orderstest.Orders/Unavailable");
+    expect(unavailable.attributes["rpc.grpc.status_code"]).toBe(
+      status.UNAVAILABLE,
+    );
+    expect(unavailable.status.code).toBe(api.SpanStatusCode.ERROR);
+    expect(unavailable.attributes["error.type"]).toBe("RpcException");
   });
 
   it("continues the trace a caller sent in the call's metadata", async () => {

@@ -156,6 +156,7 @@ export class BullObserveAgentService<Store extends Record<string, unknown>> {
           ? job.name
           : job.queue?.name ?? "bull",
       id: job.id,
+      system: "bull",
       opts: job.opts,
       metadata: this.readQueueMetadata(job),
     });
@@ -167,7 +168,7 @@ export class BullObserveAgentService<Store extends Record<string, unknown>> {
           describe(job),
           (settle) =>
             handler.call(this, job, (error, value) => {
-              settle(error ? "failed" : "completed");
+              settle(error ? "failed" : "completed", error ?? undefined);
               done?.(error, value);
             }),
           true,
