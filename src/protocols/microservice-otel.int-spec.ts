@@ -786,28 +786,23 @@ describe("ObserveModule with OpenTelemetry: a trace from HTTP into a microservic
   });
 
   /**
-   * Bug: the instance decorator wraps every function-valued property of a
-   * provider, the agent's own dispatch hook included - Nest keeps it in
-   * `ClientProxy#onDispatchHook` and calls it as `this.onDispatchHook(...)`.
-   * So the hook runs inside a `<Client>.onDispatchHook` span, injects *that*
-   * span's context, and the microservice's SERVER span hangs from a span that
-   * is the agent's own bookkeeping (see `propagateTraceIdThrough` in
-   * src/observe.module.ts and the `get` trap in
-   * src/instrument/create-instance-decorator.instrument.ts).
+   * The instance decorator wraps every function-valued property of a
+   * provider, and Nest keeps the agent's dispatch hook in
+   * `ClientProxy#onDispatchHook`, calling it as `this.onDispatchHook(...)`.
+   * Wrapped, the hook would run inside a `<Client>.onDispatchHook` span,
+   * inject *that* span's context, and hang the microservice's SERVER span
+   * from the agent's own bookkeeping. The hook is marked to be left alone.
    */
-  it.fails(
-    "does not record the agent's dispatch hook as an application span",
-    async () => {
-      await request(apiApp.getHttpServer()).get("/loopback").expect(200);
+  it("does not record the agent's dispatch hook as an application span", async () => {
+    await request(apiApp.getHttpServer()).get("/loopback").expect(200);
 
-      const server = await operationNamed('{"cmd":"sum"}');
-      const trace = traceOfSpan(server);
-      expect(trace.map((span) => span.name)).not.toContain(
-        "LoopbackClient.onDispatchHook",
-      );
-      expect(ancestryOf(trace, server)[0]).toBe("LoopbackClient.createPacket");
-    },
-  );
+    const server = await operationNamed('{"cmd":"sum"}');
+    const trace = traceOfSpan(server);
+    expect(trace.map((span) => span.name)).not.toContain(
+      "LoopbackClient.onDispatchHook",
+    );
+    expect(ancestryOf(trace, server)[0]).toBe("LoopbackClient.createPacket");
+  });
 
   it.runIf(frameworkCarriesMetadata)(
     "continues the caller's trace over Nest's own TCP transport",

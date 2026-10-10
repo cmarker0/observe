@@ -1,4 +1,5 @@
 import type { SpanRecorder } from "../recorder/span-recorder.js";
+import { isMarkedUntraced } from "./untraced.js";
 
 /**
  * Stand-in "class name" for instrumented standalone functions. Unlike methods,
@@ -199,7 +200,10 @@ export function createInstanceDecorator(
           // mid-trace). This subsumes the Axios special case that used to sit
           // here: an Axios instance is a bound `request` carrying its API as
           // own properties.
-          !isCallableObject(attributeValue);
+          !isCallableObject(attributeValue) &&
+          // A hook the agent itself installed - the microservice client's
+          // dispatch hook, which Nest calls as `this.onDispatchHook(packet)`.
+          !isMarkedUntraced(attributeValue);
         if (!shouldProxy) {
           return Reflect.get(target, prop);
         }

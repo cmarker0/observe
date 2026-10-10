@@ -1,3 +1,4 @@
+import type { MockInstance } from "vitest";
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/observe-options.interface.js";
 import { ObserveAgentWorker } from "./observe-agent.worker.js";
 
@@ -32,6 +33,7 @@ describe("ObserveAgentWorker options", () => {
   const metrics = { collectNodeRuntimeMetrics: collect };
 
   let worker: ObserveAgentWorker;
+  let initializeWorker: MockInstance;
 
   const build = (
     options: Partial<ObserveModuleOptionsWithDefaults>,
@@ -45,7 +47,9 @@ describe("ObserveAgentWorker options", () => {
     );
     // The worker thread and the profiler are out of scope here; only the
     // option resolution is under test.
-    vi.spyOn(worker, "initializeWorker").mockImplementation(() => undefined);
+    initializeWorker = vi
+      .spyOn(worker, "initializeWorker")
+      .mockImplementation(() => undefined);
     return worker;
   };
 
@@ -261,7 +265,7 @@ describe("ObserveAgentWorker options", () => {
       build({ opentelemetry: true, runtimeMetrics: true }, { startRuntime });
       worker.onModuleInit();
 
-      expect(worker.initializeWorker).not.toHaveBeenCalled();
+      expect(initializeWorker).not.toHaveBeenCalled();
       expect(flushArmed()).toBe(false);
       expect(runtimeMetricsStarted()).toBe(false);
       expect(startRuntime).toHaveBeenCalledOnce();
@@ -287,7 +291,7 @@ describe("ObserveAgentWorker options", () => {
         appSecret: "secret",
       }).onModuleInit();
 
-      expect(worker.initializeWorker).toHaveBeenCalled();
+      expect(initializeWorker).toHaveBeenCalled();
       expect(flushArmed()).toBe(true);
       expect(runtimeMetricsStarted()).toBe(false);
     });

@@ -18,6 +18,7 @@ import { ObserveAgentSharedBuffer } from "./agent/observe-agent.shared-buffer.js
 import { ObserveAgentWorker } from "./agent/observe-agent.worker.js";
 import { ObjectivesRegistry } from "./objectives/objectives.registry.js";
 import { createInstanceDecorator } from "./instrument/create-instance-decorator.instrument.js";
+import { markUntraced } from "./instrument/untraced.js";
 import {
   CreateObserveModuleOptions,
   ObserveModuleAsyncOptions,
@@ -543,21 +544,23 @@ function propagateTraceIdThrough(
     // exclusions deal with it; it is certainly not a microservice client.
     return;
   }
-  client.setOnDispatchHook((packet) => {
-    const traceId = currentTraceId();
-    if (typeof traceId === "string" && !packet.metadata?.["x-request-id"]) {
-      packet.metadata = { ...packet.metadata, "x-request-id": traceId };
-    }
-    // The span context too, when there is one to carry. A field the caller
-    // set on the packet itself is left as it is.
-    const fields: Record<string, unknown> = {};
-    spanRecorder.injectContext(fields);
-    for (const [key, value] of Object.entries(fields)) {
-      if (typeof value === "string" && packet.metadata?.[key] === undefined) {
-        packet.metadata = { ...packet.metadata, [key]: value };
+  client.setOnDispatchHook(
+    markUntraced((packet: { metadata?: Record<string, string> }) => {
+      const traceId = currentTraceId();
+      if (typeof traceId === "string" && !packet.metadata?.["x-request-id"]) {
+        packet.metadata = { ...packet.metadata, "x-request-id": traceId };
       }
-    }
-  });
+      // The span context too, when there is one to carry. A field the caller
+      // set on the packet itself is left as it is.
+      const fields: Record<string, unknown> = {};
+      spanRecorder.injectContext(fields);
+      for (const [key, value] of Object.entries(fields)) {
+        if (typeof value === "string" && packet.metadata?.[key] === undefined) {
+          packet.metadata = { ...packet.metadata, [key]: value };
+        }
+      }
+    }),
+  );
 }
 
 /**

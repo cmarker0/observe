@@ -641,37 +641,32 @@ describe("ObserveModule: GraphQL over OpenTelemetry", () => {
     expect(spans.finished.some((span) => span.name === "POST")).toBe(false);
   });
 
-  // BUG: operations batched into one HTTP request share the request's context
-  // cell, and `OtelSpanRecorder.enterStep` (src/recorder/otel-span-recorder.ts)
-  // makes each step current by mutating that shared cell. The second
-  // operation's step therefore opens under the first's, and the first
-  // operation's providers record under the second's step while it is open.
-  // The registry recorder has the same flaw (shared CALLER_METADATA_KEY).
-  // Fix: parent the step on `currentOperation().root` and `enterWith` a fresh
-  // cell instead of mutating the enclosing one. Flip to `it` once fixed.
-  it.fails(
-    "keeps operations batched into one HTTP request side by side under it",
-    async () => {
-      // The second operation stays open for 40ms, while the first calls its
-      // providers straight away.
-      await request(app.getHttpServer())
-        .post("/graphql")
-        .send([
-          { query: "{ allOrders { id } }" },
-          { query: "{ slowOrder(id: 5, delayMs: 40) { id } }" },
-        ])
-        .expect(200);
+  // Operations batched into one HTTP request enter their steps from the same
+  // request context. Each step must open under the operation and become
+  // current only for its own operation - not by swapping the span in a cell
+  // the batch shares, which nested the second step under the first and put
+  // each operation's providers under whichever step entered last. (The
+  // registry recorder still has that flaw: it shares CALLER_METADATA_KEY.)
+  it("keeps operations batched into one HTTP request side by side under it", async () => {
+    // The second operation stays open for 40ms, while the first calls its
+    // providers straight away.
+    await request(app.getHttpServer())
+      .post("/graphql")
+      .send([
+        { query: "{ allOrders { id } }" },
+        { query: "{ slowOrder(id: 5, delayMs: 40) { id } }" },
+      ])
+      .expect(200);
 
-      const trace = await spans.traceOf("POST");
-      expect(spanTree(trace)).toBe(
-        [
-          "SERVER POST",
-          "  INTERNAL OrdersResolver.allOrders",
-          "    INTERNAL OrdersService.list",
-          "  INTERNAL OrdersResolver.slowOrder",
-          "    INTERNAL OrdersService.find",
-        ].join("\n"),
-      );
-    },
-  );
+    const trace = await spans.traceOf("POST");
+    expect(spanTree(trace)).toBe(
+      [
+        "SERVER POST",
+        "  INTERNAL OrdersResolver.allOrders",
+        "    INTERNAL OrdersService.list",
+        "  INTERNAL OrdersResolver.slowOrder",
+        "    INTERNAL OrdersService.find",
+      ].join("\n"),
+    );
+  });
 });

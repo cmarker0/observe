@@ -1000,13 +1000,8 @@ class SecondScheduleTestModule {}
  * handlers through its own module, as the queue agents already do: they park
  * the original method and replace their wrapper on every boot.
  *
- * BUG: `ScheduleObserveAgentService.patchScheduleExplorer`
- * (src/protocols/schedule-observe-agent.service.ts) returns early once the
- * explorer is marked patched, so the wrapper - and the agent, recorder and
- * async store it closes over - stays the first app's for the life of the
- * process. The second app's firings are recorded by the first module's
- * recorder, into the first provider, and the providers they call find no
- * operation of their own to nest under.
+ * Once marked patched the explorer used to stay the first app's for the
+ * life of the process, its firings recorded into the first provider.
  */
 describe("ObserveModule: @nestjs/schedule in a second app in the same process", () => {
   let app: INestApplication;
@@ -1025,32 +1020,29 @@ describe("ObserveModule: @nestjs/schedule in a second app in the same process", 
     uninstallOtelGlobals();
   });
 
-  it.fails(
-    "records the second app's firings through the second app's module",
-    async () => {
-      const root = await secondSpans.waitFor(
-        (finished) =>
-          finished.find(
-            (span) =>
-              span.attributes[ObserveAttributes.JOB_NAME] ===
-              "SecondTasksService.tick",
-          ),
-        2000,
-        "the second app's tick run",
-      );
-      expect(
-        spanTree(
-          secondSpans.finished.filter(
-            (span) => span.spanContext().traceId === root.spanContext().traceId,
-          ),
+  it("records the second app's firings through the second app's module", async () => {
+    const root = await secondSpans.waitFor(
+      (finished) =>
+        finished.find(
+          (span) =>
+            span.attributes[ObserveAttributes.JOB_NAME] ===
+            "SecondTasksService.tick",
         ),
-      ).toBe(
-        [
-          "CONSUMER process timeout",
-          "  INTERNAL SecondTasksService.tick",
-          "    INTERNAL LedgerService.reconcile",
-        ].join("\n"),
-      );
-    },
-  );
+      2000,
+      "the second app's tick run",
+    );
+    expect(
+      spanTree(
+        secondSpans.finished.filter(
+          (span) => span.spanContext().traceId === root.spanContext().traceId,
+        ),
+      ),
+    ).toBe(
+      [
+        "CONSUMER process timeout",
+        "  INTERNAL SecondTasksService.tick",
+        "    INTERNAL LedgerService.reconcile",
+      ].join("\n"),
+    );
+  });
 });

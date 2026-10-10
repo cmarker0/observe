@@ -181,16 +181,16 @@ describe("ObserveModule with OpenTelemetry: gRPC", () => {
       name: "order-42",
     });
 
-    const trace = await spans.traceOf("FindOne");
+    const trace = await spans.traceOf("orderstest.Orders/FindOne");
     expect(spanTree(trace)).toBe(
       [
-        "SERVER FindOne",
+        "SERVER orderstest.Orders/FindOne",
         "  INTERNAL OrdersGrpcController.findOne",
         "    INTERNAL OrdersService.find",
       ].join("\n"),
     );
 
-    const root = spanNamed(trace, "FindOne");
+    const root = spanNamed(trace, "orderstest.Orders/FindOne");
     // No context in the metadata, so the call starts a trace of its own.
     expect(root.parentSpanContext).toBeUndefined();
     expect(root.status.code).toBe(api.SpanStatusCode.UNSET);
@@ -204,15 +204,12 @@ describe("ObserveModule with OpenTelemetry: gRPC", () => {
   });
 
   /**
-   * Bug: semantic conventions name a gRPC server span `$package.$service/
-   * $method` and give it `rpc.service`; the recorder sets neither, so two
-   * services with a method of the same name aggregate into one operation.
-   * The full path is on the call (`call.path`, "/orderstest.Orders/FindOne")
-   * but `startGrpcRequestTracing` passes only `methodHandler.name` on (see
-   * src/protocols/rpc-observe-agent.service.ts and `describeOperation` in
-   * src/recorder/otel-span-recorder.ts).
+   * Semantic conventions name a gRPC server span `$package.$service/$method`
+   * and give it `rpc.service`, so two services with a method of the same
+   * name stay apart. Nest passes on only the method; the service comes from
+   * the call's own path (`/orderstest.Orders/FindOne`).
    */
-  it.fails("names the service the method belongs to", async () => {
+  it("names the service the method belongs to", async () => {
     await call("FindOne", { id: "1" });
 
     const root = await spans.waitFor((finished) =>
@@ -226,7 +223,7 @@ describe("ObserveModule with OpenTelemetry: gRPC", () => {
     });
   });
 
-  it("starts one trace per call, named after each method", async () => {
+  it("starts one trace per call, named after each service method", async () => {
     await call("FindOne", { id: "1" });
     await call("Ping", { id: "1" });
     await call("FindOne", { id: "2" });
@@ -238,9 +235,9 @@ describe("ObserveModule with OpenTelemetry: gRPC", () => {
       return found.length >= 3 ? found : undefined;
     });
     expect(roots.map((span) => span.name).sort()).toEqual([
-      "FindOne",
-      "FindOne",
-      "Ping",
+      "orderstest.Orders/FindOne",
+      "orderstest.Orders/FindOne",
+      "orderstest.Orders/Ping",
     ]);
     expect(new Set(roots.map((span) => span.spanContext().traceId)).size).toBe(
       3,
@@ -255,12 +252,15 @@ describe("ObserveModule with OpenTelemetry: gRPC", () => {
   it("fails a call whose handler threw, with the error redacted", async () => {
     await expect(call("Explode", { id: "9" })).rejects.toBeDefined();
 
-    const trace = await spans.traceOf("Explode");
+    const trace = await spans.traceOf("orderstest.Orders/Explode");
     expect(spanTree(trace)).toBe(
-      ["SERVER Explode", "  INTERNAL OrdersGrpcController.explode"].join("\n"),
+      [
+        "SERVER orderstest.Orders/Explode",
+        "  INTERNAL OrdersGrpcController.explode",
+      ].join("\n"),
     );
 
-    const root = spanNamed(trace, "Explode");
+    const root = spanNamed(trace, "orderstest.Orders/Explode");
     expect(root.status.code).toBe(api.SpanStatusCode.ERROR);
     expect(root.attributes).toMatchObject({
       [ObserveAttributes.STATUS_CODE]: 500,
@@ -280,7 +280,7 @@ describe("ObserveModule with OpenTelemetry: gRPC", () => {
 
     // Filed under a 4xx and marked handled, so the backend counts it apart
     // from a crash; it still fails the span, as an RPC has no client to blame.
-    const root = await operationNamed("Reject");
+    const root = await operationNamed("orderstest.Orders/Reject");
     expect(root.status.code).toBe(api.SpanStatusCode.ERROR);
     expect(root.attributes).toMatchObject({
       [ObserveAttributes.STATUS_CODE]: 400,
@@ -292,7 +292,7 @@ describe("ObserveModule with OpenTelemetry: gRPC", () => {
   it("marks a bare IntrinsicException as handled too", async () => {
     await expect(call("Decline", { id: "9" })).rejects.toBeDefined();
 
-    const root = await operationNamed("Decline");
+    const root = await operationNamed("orderstest.Orders/Decline");
     expect(root.attributes).toMatchObject({
       [ObserveAttributes.STATUS_CODE]: 400,
       [ObserveAttributes.ERROR_HANDLED]: true,
@@ -304,8 +304,8 @@ describe("ObserveModule with OpenTelemetry: gRPC", () => {
     await expect(call("ExplodeAsync", { id: "9" })).rejects.toBeDefined();
     await expect(call("RejectAsync", { id: "9" })).rejects.toBeDefined();
 
-    const crashed = await operationNamed("ExplodeAsync");
-    const rejected = await operationNamed("RejectAsync");
+    const crashed = await operationNamed("orderstest.Orders/ExplodeAsync");
+    const rejected = await operationNamed("orderstest.Orders/RejectAsync");
     expect(crashed.status.code).toBe(api.SpanStatusCode.ERROR);
     expect(crashed.attributes[ObserveAttributes.STATUS_CODE]).toBe(500);
     expect(rejected.status.code).toBe(api.SpanStatusCode.ERROR);
@@ -319,14 +319,14 @@ describe("ObserveModule with OpenTelemetry: gRPC", () => {
       withTraceparent(`00-${CALLER_TRACE_ID}-${CALLER_SPAN_ID}-01`),
     );
 
-    const trace = await spans.traceOf("FindOne");
-    const root = spanNamed(trace, "FindOne");
+    const trace = await spans.traceOf("orderstest.Orders/FindOne");
+    const root = spanNamed(trace, "orderstest.Orders/FindOne");
     expect(root.spanContext().traceId).toBe(CALLER_TRACE_ID);
     expect(parentIdOf(root)).toBe(CALLER_SPAN_ID);
     // The caller's span is not here, so the call is still this trace's root.
     expect(spanTree(trace)).toBe(
       [
-        "SERVER FindOne",
+        "SERVER orderstest.Orders/FindOne",
         "  INTERNAL OrdersGrpcController.findOne",
         "    INTERNAL OrdersService.find",
       ].join("\n"),
@@ -346,20 +346,22 @@ describe("ObserveModule with OpenTelemetry: gRPC", () => {
     );
     // A sampled call after it, to know the first has had time to finish.
     await call("Ping", { id: "6" });
-    await operationNamed("Ping");
+    await operationNamed("orderstest.Orders/Ping");
 
     expect(
       spans.finished.filter(
         (span) => span.spanContext().traceId === CALLER_TRACE_ID,
       ),
     ).toEqual([]);
-    expect(spans.finished.map((span) => span.name)).not.toContain("FindOne");
+    expect(spans.finished.map((span) => span.name)).not.toContain(
+      "orderstest.Orders/FindOne",
+    );
   });
 
   it("starts a trace of its own when the metadata holds no valid context", async () => {
     await call("FindOne", { id: "7" }, withTraceparent("00-not-a-trace-01"));
 
-    const root = await operationNamed("FindOne");
+    const root = await operationNamed("orderstest.Orders/FindOne");
     expect(root.parentSpanContext).toBeUndefined();
     expect(root.spanContext().traceId).toMatch(/^[0-9a-f]{32}$/);
   });

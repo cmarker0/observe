@@ -199,29 +199,24 @@ describe("ObserveModule: bootstrap alongside hostile providers (OpenTelemetry)",
    * `ClsMiddleware.use` is instrumented, and its step span ends when `use`
    * settles - but `next()`, called inside it, carries its async context on to
    * the guards, interceptors and handler that run afterwards. They find the
-   * middleware's ended span as their parent, `OtelSpanRecorder.runStep` sees
-   * it is no longer recording and runs them untraced: with nestjs-cls's
-   * middleware mounted, no controller or provider span is ever recorded. (The
-   * snapshot recorder files the same steps at the root.) The handler belongs
-   * under the nearest span still open - the request's root.
+   * middleware's ended span as their parent; the recorder walks up to the
+   * nearest span still open - the request's root - rather than drop them, as
+   * it once did, recording no controller or provider span at all.
    */
-  it.fails(
-    "records the handler and the providers it calls beneath the request",
-    async () => {
-      await request(app.getHttpServer()).get("/status").expect(200);
+  it("records the handler and the providers it calls beneath the request", async () => {
+    await request(app.getHttpServer()).get("/status").expect(200);
 
-      const trace = await spans.traceOf("GET /status");
-      expect(spanTree(trace)).toContain(
-        [
-          "  INTERNAL StatusController.status",
-          "    INTERNAL ClsService.getId",
-          "    INTERNAL RequestInfoService.path",
-          "    INTERNAL ThrowingGetterService.ping",
-        ].join("\n"),
-      );
-      expect(
-        spanNamed(trace, "StatusController.status").parentSpanContext?.spanId,
-      ).toBe(spanNamed(trace, "GET /status").spanContext().spanId);
-    },
-  );
+    const trace = await spans.traceOf("GET /status");
+    expect(spanTree(trace)).toContain(
+      [
+        "  INTERNAL StatusController.status",
+        "    INTERNAL ClsService.getId",
+        "    INTERNAL RequestInfoService.path",
+        "    INTERNAL ThrowingGetterService.ping",
+      ].join("\n"),
+    );
+    expect(
+      spanNamed(trace, "StatusController.status").parentSpanContext?.spanId,
+    ).toBe(spanNamed(trace, "GET /status").spanContext().spanId);
+  });
 });

@@ -38,6 +38,8 @@ interface GrpcCall<TRequest = any, TMetadata = any> {
   request: TRequest;
   metadata: TMetadata;
   operationId: string;
+  /** grpc-js's own field, `/package.Service/Method`; kept by Nest's spread. */
+  path?: string;
 }
 
 @Injectable()
@@ -223,6 +225,7 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
                 correlationId: traceId,
                 protocol: this.toProtocolName(transportId),
                 operationId: call.operationId,
+                rpcService: grpcServiceOf(call),
                 tags: this.options.grpc?.tags,
                 carrier: call.metadata,
                 sampling: ["grpc", { call }],
@@ -303,4 +306,10 @@ function rpcCarrierOf(ctx: BaseRpcContext): unknown {
   } catch {
     return undefined;
   }
+}
+
+/** `package.Service` from the call's `/package.Service/Method` path. */
+function grpcServiceOf(call: GrpcCall): string | undefined {
+  const path = typeof call.path === "string" ? call.path : undefined;
+  return path?.split("/")[1] || undefined;
 }

@@ -387,26 +387,20 @@ describe("ObserveModule: HTTP collection on Fastify (OpenTelemetry)", () => {
    * a span a pass-through interceptor (the shape of `@sentry/nestjs`'s) has
    * already ended by the time the handler starts.
    *
-   * The snapshot recorder files such a handler at the root. The OTel recorder
-   * sees the ended interceptor span as the parent, finds it no longer
-   * recording, and records the handler - and everything under it - not at
-   * all: `OtelSpanRecorder.runStep` returns `fn(false)` when
-   * `currentSpan()` is not recording. The handler belongs under the nearest
-   * span still open, the root.
+   * The handler belongs under the nearest span still open, the root - where
+   * the snapshot recorder files it too. Taking the ended span at its word
+   * would record the handler, and everything under it, not at all.
    */
-  it.fails(
-    "still records the handler behind an interceptor whose span already ended",
-    async () => {
-      await request(app.getHttpServer()).get("/intercepted").expect(200);
+  it("still records the handler behind an interceptor whose span already ended", async () => {
+    await request(app.getHttpServer()).get("/intercepted").expect(200);
 
-      const trace = await spans.traceOf("GET /intercepted");
-      expect(spanTree(trace)).toBe(
-        [
-          "SERVER GET /intercepted",
-          "  INTERNAL PassThroughInterceptor.intercept",
-          "  INTERNAL InterceptedController.findAll",
-        ].join("\n"),
-      );
-    },
-  );
+    const trace = await spans.traceOf("GET /intercepted");
+    expect(spanTree(trace)).toBe(
+      [
+        "SERVER GET /intercepted",
+        "  INTERNAL PassThroughInterceptor.intercept",
+        "  INTERNAL InterceptedController.findAll",
+      ].join("\n"),
+    );
+  });
 });
