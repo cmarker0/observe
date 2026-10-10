@@ -137,6 +137,8 @@ export class OtelSpanRecorder extends SpanRecorder {
   private readonly names = new WeakMap<Otel.Span, string>();
   /** The span behind each open `StepHandle`, for `injectContext`. */
   private readonly steps = new WeakMap<StepHandle, Otel.Span>();
+  /** The span each step and manual span was opened under. */
+  private readonly parents = new WeakMap<Otel.Span, Otel.Span>();
   private readonly tracer: Otel.Tracer;
   private readonly propagator: PropagatorSource;
   private sampler: TraceSamplerService | undefined;
@@ -225,7 +227,12 @@ export class OtelSpanRecorder extends SpanRecorder {
     }
 
     this.names.set(root, described.name);
-    const operation = new OtelOperation(this, root, start);
+    const operation = new OtelOperation(
+      this,
+      root,
+      start,
+      foreign && httpRpcMetadata(parentContext),
+    );
     this.operations.set(root, operation);
     store?.set(OPERATION_KEY, operation);
     return this.within(root, parentContext, () => fn(operation));
@@ -283,33 +290,25 @@ export class OtelSpanRecorder extends SpanRecorder {
   enterStep(
     name: StepName,
   ): { step: StepHandle; restore: () => void } | undefined {
-    const parent = this.currentSpan();
+    // Under the operation itself where there is one. Several GraphQL
+    // operations batched into one HTTP request all enter from the request's
+    // context, so whatever is current there may be a sibling's step.
+    const operation = this.currentOperation() as OtelOperation | undefined;
+    const parent = operation?.root ?? this.currentSpan();
     if (!parent?.isRecording()) {
       return undefined;
     }
     const span = this.startStep(this.contextUnder(parent), name);
     const step = this.stepHandle(span, parent);
-    const active = this.api.trace.getSpan(this.api.context.active());
 
-    const cell = this.slot.getStore();
-    if (cell) {
-      // Shared by reference across the rest of the operation, so `restore`
-      // is a real restore rather than a scoped one.
-      const previous = { ...cell };
-      cell.span = span;
-      cell.base = active;
-      return {
-        step,
-        restore: () => {
-          cell.span = previous.span;
-          cell.base = previous.base;
-        },
-      };
-    }
-
-    // No enclosing cell: a GraphQL operation with no transport in front of
-    // it, whose store the agent installed with `enterWith`. Same here.
-    const entered: Cell = { span, base: active };
+    // A cell of its own rather than the request's, which the batch shares:
+    // swapping the span in a shared cell put each operation's providers
+    // under whichever step entered last. `enterWith` reaches everything the
+    // driver runs from here on, which is what wrapping cannot.
+    const entered: Cell = {
+      span,
+      base: this.api.trace.getSpan(this.api.context.active()),
+    };
     this.slot.enterWith(entered);
     return {
       step,
@@ -334,6 +333,7 @@ export class OtelSpanRecorder extends SpanRecorder {
       parentContext,
     );
     this.names.set(span, name);
+    this.parents.set(span, parent);
     return this.within(span, parentContext, async () => {
       try {
         const result = await fn(this.sinkOf(span));
@@ -457,13 +457,36 @@ export class OtelSpanRecorder extends SpanRecorder {
     const cell = this.slot.getStore();
     const active = this.api.trace.getSpan(this.api.context.active());
     if (cell) {
-      return !active || active === cell.base || active === cell.span
-        ? cell.span
-        : active;
+      return this.nearestOpen(
+        !active || active === cell.base || active === cell.span
+          ? cell.span
+          : active,
+      );
     }
     const store = this.als.getStore() as Store | undefined;
     const operation = store?.get(OPERATION_KEY) as OtelOperation | undefined;
-    return operation?.root ?? active;
+    return this.nearestOpen(operation?.root ?? active);
+  }
+
+  /**
+   * `span`, or the nearest of this recorder's spans above it still open.
+   *
+   * Nest runs what comes next in the async context of the step before:
+   * `next.handle()` in an interceptor, `next()` in middleware. By the time
+   * the handler runs that step has ended, and work started under an ended
+   * span would be dropped - the handler and all beneath it. It belongs
+   * where the ended step itself was.
+   */
+  private nearestOpen(span: Otel.Span | undefined): Otel.Span | undefined {
+    let open = span;
+    while (open && !open.isRecording()) {
+      const parent = this.parents.get(open);
+      if (!parent) {
+        break;
+      }
+      open = parent;
+    }
+    return open;
   }
 
   /**
@@ -557,6 +580,10 @@ export class OtelSpanRecorder extends SpanRecorder {
       parentContext,
     );
     this.names.set(span, label);
+    const parent = this.api.trace.getSpan(parentContext);
+    if (parent) {
+      this.parents.set(span, parent);
+    }
     return span;
   }
 
@@ -653,6 +680,8 @@ class OtelOperation implements OperationHandle {
     private readonly recorder: OtelSpanRecorder,
     readonly root: Otel.Span,
     readonly start: OperationStart,
+    /** The foreign SERVER span's route slot, when one is waiting for it. */
+    private readonly rpcMetadata?: RpcMetadata,
   ) {
     this.hasOperationId = start.operationId !== undefined;
   }
@@ -662,6 +691,12 @@ class OtelOperation implements OperationHandle {
       return;
     }
     this.root.setAttribute("http.route", path);
+    // instrumentation-http names its SERVER span and sets `http.route` from
+    // this when the response ends - what its Express and Nest instrumentations
+    // do for it, and the only way to reach a span it alone will end.
+    if (this.rpcMetadata && this.rpcMetadata.route === undefined) {
+      this.rpcMetadata.route = path;
+    }
     const method = this.start.attributes?.method;
     this.recorder.setName(this.root, method ? `${method} ${path}` : path);
   }
@@ -798,15 +833,45 @@ function describeOperation(
       attributes,
       definedOnly({
         "rpc.system": protocol.toLowerCase() || undefined,
+        "rpc.service": start.rpcService,
         "rpc.method": operationId,
       }),
     );
   }
   return {
-    name: operationId ?? protocol,
+    // `package.Service/Method`, as semantic conventions name a gRPC span:
+    // the bare method would merge same-named methods of different services.
+    name:
+      start.rpcService && operationId
+        ? `${start.rpcService}/${operationId}`
+        : operationId ?? protocol,
     kind: api.SpanKind.SERVER,
     attributes,
   };
+}
+
+/**
+ * `@opentelemetry/core`'s RPC metadata, as `instrumentation-http` leaves it in
+ * the context of an inbound request. Read through the key's registered symbol
+ * rather than core's helpers, which are not a dependency of this package.
+ */
+interface RpcMetadata {
+  type: string | number;
+  route?: string;
+}
+
+/** `RPCType.HTTP` in `@opentelemetry/core`. */
+const RPC_TYPE_HTTP = "http";
+
+const RPC_METADATA_KEY = Symbol.for(
+  "OpenTelemetry SDK Context Key RPC_METADATA",
+);
+
+function httpRpcMetadata(context: Otel.Context): RpcMetadata | undefined {
+  const metadata = context.getValue(RPC_METADATA_KEY) as
+    | RpcMetadata
+    | undefined;
+  return metadata?.type === RPC_TYPE_HTTP ? metadata : undefined;
 }
 
 function isHttp(start: OperationStart): boolean {

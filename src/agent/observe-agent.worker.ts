@@ -79,6 +79,19 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
   ) {}
 
   onModuleInit() {
+    if (this.options.opentelemetry) {
+      // Read by the application's metric reader, not shipped from here.
+      if (this.options.runtimeMetrics && this.otelMetrics) {
+        this.stopOtelRuntimeMetrics = this.otelMetrics.startRuntime();
+      }
+      // Spans and metrics leave through the application's SDK. Forwarded
+      // logs are all that still travel to the collector, so without them
+      // there is no worker to start and no buffer to flush.
+      if (!this.options.forwardLogs) {
+        return;
+      }
+    }
+
     if (this.hasScaffoldCredentials) {
       // Nothing is sent, so there is no worker to start. The flush timer below
       // still runs and empties the buffer, which the instrumentation keeps
@@ -105,13 +118,7 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
     }
     this.flushInterval = setInterval(() => this.flush(), flushIntervalTime);
 
-    if (this.otelMetrics) {
-      // Read by the application's metric reader, not shipped from here - so
-      // whether the collector credentials are real makes no difference.
-      if (this.options.runtimeMetrics) {
-        this.stopOtelRuntimeMetrics = this.otelMetrics.startRuntime();
-      }
-    } else if (!this.hasScaffoldCredentials) {
+    if (!this.options.opentelemetry && !this.hasScaffoldCredentials) {
       this.startRuntimeMetrics();
     }
 

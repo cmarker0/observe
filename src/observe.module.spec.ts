@@ -601,3 +601,77 @@ describe("createObserveModule#serviceId", () => {
     ).resolves.toMatchObject({ serviceId: SENT });
   });
 });
+
+describe("createObserveModule#opentelemetry options", () => {
+  const optionsOf = (module: { providers?: unknown[] }) =>
+    (
+      module.providers!.find(
+        (provider) =>
+          (provider as { provide?: unknown }).provide === OBSERVE_OPTIONS,
+      ) as { useValue: Record<string, unknown> }
+    ).useValue;
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("takes forRoot without credentials or a service id", () => {
+    const { ObserveModule } = createObserveModule({ opentelemetry: true });
+
+    expect(optionsOf(ObserveModule.forRoot({}))).toMatchObject({
+      opentelemetry: true,
+    });
+  });
+
+  it("still requires them without opentelemetry", () => {
+    const { ObserveModule } = createObserveModule();
+
+    // @ts-expect-error appKey, appSecret and serviceId are required here
+    ObserveModule.forRoot({});
+  });
+
+  it("switches forwardLogs off, saying why, without all three", () => {
+    const warn = vi
+      .spyOn(Logger.prototype, "warn")
+      .mockImplementation(() => undefined);
+    const { ObserveModule } = createObserveModule({ opentelemetry: true });
+
+    expect(
+      optionsOf(
+        ObserveModule.forRoot({
+          forwardLogs: true,
+          appKey: "key",
+          appSecret: "secret",
+        }),
+      ).forwardLogs,
+    ).toBe(false);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("forwardLogs is switched off"),
+    );
+  });
+
+  it("keeps forwardLogs when all three are given", () => {
+    const { ObserveModule } = createObserveModule({ opentelemetry: true });
+
+    expect(
+      optionsOf(
+        ObserveModule.forRoot({
+          forwardLogs: true,
+          appKey: "key",
+          appSecret: "secret",
+          serviceId: "svc",
+        }),
+      ).forwardLogs,
+    ).toBe(true);
+  });
+
+  it("applies the same rule to options resolved asynchronously", async () => {
+    vi.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
+    const { ObserveModule } = createObserveModule({ opentelemetry: true });
+    const [provider] = ObserveModule.createAsyncProviders({
+      useFactory: () => ({ forwardLogs: true }),
+    });
+
+    await expect(
+      (provider as FactoryProvider).useFactory(),
+    ).resolves.toMatchObject({ forwardLogs: false });
+  });
+});

@@ -46,6 +46,11 @@ export interface OperationStart {
   /** Transport name as reported today: `http`, `TCP`, `KAFKA`, `ws`, ... */
   protocol?: string;
   operationId?: string;
+  /**
+   * gRPC only: the fully qualified service the method belongs to
+   * (`package.Service`), which `operationId` - the bare method - leaves out.
+   */
+  rpcService?: string;
   tags?: Tags;
   attributes?: { method?: string; originalUrl?: string };
   /** Job runs only: queue, name, id and driver metadata. */

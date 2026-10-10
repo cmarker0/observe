@@ -208,7 +208,8 @@ export interface CreateObserveModuleOptions {
    *   own with a link to the enqueuing span.
    * - When another instrumentation (`instrumentation-http`, say) already
    *   opened a span for the inbound call, the operation nests under it as an
-   *   INTERNAL span instead of repeating the SERVER span. Its outgoing
+   *   INTERNAL span instead of repeating the SERVER span, and hands
+   *   `instrumentation-http`'s span the route to be named after. Its outgoing
    *   counterparts (`instrumentation-http`, `-undici`) duplicate
    *   `outgoing.http`; switch one of them off.
    *
@@ -222,7 +223,11 @@ export interface CreateObserveModuleOptions {
    *
    * Log lines keep their trace correlation (see `logCorrelation`), and JSON
    * lines gain a `spanId`. Forwarded logs (`forwardLogs`) still go to the
-   * collector.
+   * Observe collector - the only thing that does.
+   *
+   * So `ObserveModule.forRoot()` no longer needs `appKey`, `appSecret` or
+   * `serviceId`, and no worker thread starts. Give all three to keep
+   * `forwardLogs`; without them it is switched off, with a warning.
    *
    * Options:
    * - `tracerProvider`: a provider other than the global one.
@@ -252,6 +257,9 @@ export interface ObserveOptions {
    * Sent as `x-api-key` on every ingest request, alongside `appSecret`.
    * Without valid credentials the collector answers 401 and the batch is
    * dropped.
+   *
+   * Optional with `createObserveModule({ opentelemetry })`, where only
+   * `forwardLogs` uses it.
    */
   appKey: string;
 
@@ -262,6 +270,9 @@ export interface ObserveOptions {
    * retrievable afterwards, so treat it as you would a password: supply it from
    * the environment rather than committing it alongside the rest of this config.
    * If it is lost, issue a new pair from the dashboard.
+   *
+   * Optional with `createObserveModule({ opentelemetry })`, where only
+   * `forwardLogs` uses it.
    */
   appSecret: string;
 
@@ -286,6 +297,9 @@ export interface ObserveOptions {
    * At most 100 characters, the longest the collector accepts. A longer one is
    * cut to fit, with a warning when the application starts: its first 91 and a
    * hash of the whole, so two ids that differ only past the cut stay apart.
+   *
+   * Optional with `createObserveModule({ opentelemetry })`, where the SDK's
+   * resource names the service and only `forwardLogs` uses this.
    */
   serviceId: string;
 
@@ -810,6 +824,29 @@ export interface ObserveOptions {
   };
 }
 
+/**
+ * `ObserveOptions` once `createObserveModule({ opentelemetry })` is on. The
+ * application's SDK decides where telemetry goes and what the service is
+ * called (its resource's `service.name`), so the collector's credentials and
+ * `serviceId` are optional. Only `forwardLogs` still ships to the Observe
+ * collector, and only when all three are given.
+ */
+export type OpenTelemetryObserveOptions = Omit<
+  ObserveOptions,
+  "appKey" | "appSecret" | "serviceId"
+> &
+  Partial<Pick<ObserveOptions, "appKey" | "appSecret" | "serviceId">>;
+
+/**
+ * What `ObserveModule.forRoot()` takes for the options `createObserveModule()`
+ * was given: `OpenTelemetryObserveOptions` when `opentelemetry` is known, at
+ * compile time, to be on.
+ */
+export type ObserveOptionsFor<Options extends CreateObserveModuleOptions> =
+  Options extends { opentelemetry: true | object }
+    ? OpenTelemetryObserveOptions
+    : ObserveOptions;
+
 export type ObserveModuleOptionsWithDefaults =
   Required<CreateObserveModuleOptions> & ObserveOptions;
 
@@ -817,15 +854,18 @@ export type ObserveModuleOptionsWithDefaults =
  * Implemented by the class passed to `ObserveModule.forRootAsync()` as
  * `useClass` or `useExisting`.
  */
-export interface ObserveOptionsFactory {
-  createObserveOptions(): Promise<ObserveOptions> | ObserveOptions;
+export interface ObserveOptionsFactory<
+  Options extends OpenTelemetryObserveOptions = ObserveOptions,
+> {
+  createObserveOptions(): Promise<Options> | Options;
 }
 
-export interface ObserveModuleAsyncOptions
-  extends Pick<ModuleMetadata, "imports"> {
-  useExisting?: Type<ObserveOptionsFactory>;
-  useClass?: Type<ObserveOptionsFactory>;
-  useFactory?: (...args: any[]) => Promise<ObserveOptions> | ObserveOptions;
+export interface ObserveModuleAsyncOptions<
+  Options extends OpenTelemetryObserveOptions = ObserveOptions,
+> extends Pick<ModuleMetadata, "imports"> {
+  useExisting?: Type<ObserveOptionsFactory<Options>>;
+  useClass?: Type<ObserveOptionsFactory<Options>>;
+  useFactory?: (...args: any[]) => Promise<Options> | Options;
   inject?: FactoryProvider["inject"];
   /**
    * Extra providers to be registered

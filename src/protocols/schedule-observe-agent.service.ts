@@ -31,10 +31,14 @@ const SCHEDULER_TYPE_LABELS: Record<number, string> = {
   3: "interval",
 };
 
+/** Where the explorer's own `wrapFunctionInTryCatchBlocks` is parked. */
+const ORIGINAL_WRAP = Symbol.for("@nestjs/observe:schedule-original-wrap");
+
 /** The `ScheduleExplorer` surface this service patches, structurally typed. */
 interface ScheduleExplorerLike {
   prototype?: {
     wrapFunctionInTryCatchBlocks?: WrapFunction;
+    [ORIGINAL_WRAP]?: WrapFunction;
   };
 }
 
@@ -147,7 +151,19 @@ export class ScheduleObserveAgentService<
     }
 
     const prototype = ScheduleExplorer.prototype;
-    const originalWrap = prototype?.wrapFunctionInTryCatchBlocks;
+    // The original is parked on the prototype the first time, and every
+    // patch after wraps that rather than the patch before it - the way the
+    // queue agents park `add`. A second `createObserveModule()` in the same
+    // process (tests, an app booted after another closed) then takes over
+    // the hook instead of nesting inside, or leaving its handlers reporting
+    // to, the first one's recorder.
+    if (
+      prototype &&
+      !Object.prototype.hasOwnProperty.call(prototype, ORIGINAL_WRAP)
+    ) {
+      prototype[ORIGINAL_WRAP] = prototype.wrapFunctionInTryCatchBlocks;
+    }
+    const originalWrap = prototype?.[ORIGINAL_WRAP];
     if (typeof originalWrap !== "function") {
       // Installed, but shaped differently from every version this was written
       // against. Worth saying out loud: the symptom otherwise is a service
@@ -158,25 +174,16 @@ export class ScheduleObserveAgentService<
       return;
     }
 
-    // Re-entrant patching (a second `createObserveModule()` in the same
-    // process, tests included) must not nest one wrapper inside another.
-    const PATCHED = Symbol.for("@nestjs/observe:schedule-patched");
-    const marked = originalWrap as WrapFunction & { [PATCHED]?: true };
-    if (marked[PATCHED]) {
-      return;
-    }
-
     const instrument = (methodRef: ScheduledHandler, instance: object) =>
       this.instrumentHandler(methodRef, instance);
 
-    const patched: WrapFunction & { [PATCHED]?: true } = function (
+    const patched: WrapFunction = function (
       this: unknown,
       methodRef,
       instance,
     ) {
       return originalWrap.call(this, instrument(methodRef, instance), instance);
     };
-    patched[PATCHED] = true;
     prototype!.wrapFunctionInTryCatchBlocks = patched;
   }
 

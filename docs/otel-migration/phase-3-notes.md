@@ -130,10 +130,11 @@ through `observeTraceId`, is its `nestjs.observe.correlation_id`.
 ## Left for later
 
 - No int test runs alongside `@opentelemetry/instrumentation-http`. The
-  INTERNAL rule is unit-tested with a foreign span. Phase 5's end-to-end run
-  against a real Collector is the place for it.
+  INTERNAL rule is unit-tested with a foreign span. Done in Phase 5
+  (`otel-coexistence.int-spec.ts`).
 - `http.route` is not copied onto a foreign SERVER span (that needs
-  `@opentelemetry/core`'s RPC metadata, not just the API).
+  `@opentelemetry/core`'s RPC metadata, not just the API). Done in Phase 5,
+  through the context key's registered symbol.
 - Kafka/RMQ/NATS producers outside Nest's `ClientProxy` are not injected
   into. RMQ and NATS consumers read only packet metadata.
 - The `node:http` client's downstream parent is the calling span (see above).
