@@ -208,7 +208,8 @@ export interface CreateObserveModuleOptions {
    *   own with a link to the enqueuing span.
    * - When another instrumentation (`instrumentation-http`, say) already
    *   opened a span for the inbound call, the operation nests under it as an
-   *   INTERNAL span instead of repeating the SERVER span. Its outgoing
+   *   INTERNAL span instead of repeating the SERVER span, and hands
+   *   `instrumentation-http`'s span the route to be named after. Its outgoing
    *   counterparts (`instrumentation-http`, `-undici`) duplicate
    *   `outgoing.http`; switch one of them off.
    *

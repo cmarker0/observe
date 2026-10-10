@@ -85,7 +85,7 @@ Phase 4 keeps to "trace correlation only".
   still starts. With spans and metrics on OTel, it only carries forwarded
   logs. Making the credentials optional when `opentelemetry` is on (and not
   starting the worker unless `forwardLogs` is set) belongs with Phase 5's
-  "OTel by default".
+  "OTel by default". Done in Phase 5; see `phase-5-notes.md`.
 
 ## Verification
 

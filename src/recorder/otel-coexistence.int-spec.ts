@@ -109,6 +109,40 @@ describe("ObserveModule: beside instrumentation-http", () => {
         span.kind !== api.SpanKind.CLIENT || parentIdOf(span) !== undefined,
     );
 
+  /**
+   * The trace whose SDK SERVER span is named `name`, once that span and the
+   * operation of the same name under it have both ended - they end on the
+   * same response, in no fixed order.
+   */
+  const serverTrace = async (name: string) => {
+    const server = await spans.waitFor((finished) => {
+      const named = finished.filter((span) => span.name === name);
+      const found = named.find((span) => span.kind === api.SpanKind.SERVER);
+      return found &&
+        named.some(
+          (span) =>
+            span.kind === api.SpanKind.INTERNAL &&
+            span.spanContext().traceId === found.spanContext().traceId,
+        )
+        ? found
+        : undefined;
+    });
+    const { traceId } = server.spanContext();
+    return fromServer(
+      spans.finished.filter((span) => span.spanContext().traceId === traceId),
+    );
+  };
+
+  /** The SDK's SERVER span and the operation beneath it, both `name`d. */
+  const split = (trace: ReadableSpan[], name: string) => {
+    const server = trace.find((span) => span.kind === api.SpanKind.SERVER);
+    const operation = trace.find(
+      (span) => span.kind === api.SpanKind.INTERNAL && span.name === name,
+    );
+    expect(server?.name).toBe(name);
+    return { server: server!, operation: operation! };
+  };
+
   const serverSpans = () =>
     spans.finished.filter((span) => span.kind === api.SpanKind.SERVER);
 
@@ -133,10 +167,10 @@ describe("ObserveModule: beside instrumentation-http", () => {
   it("nests the operation under the SDK's SERVER span instead of repeating it", async () => {
     await request(app.getHttpServer()).get("/orders/7").expect(200);
 
-    const trace = fromServer(await spans.traceOf("GET /orders/:id"));
+    const trace = await serverTrace("GET /orders/:id");
     expect(spanTree(trace)).toBe(
       [
-        "SERVER GET",
+        "SERVER GET /orders/:id",
         "  INTERNAL GET /orders/:id",
         "    INTERNAL OrdersController.findOne",
         "      INTERNAL OrdersService.list",
@@ -144,12 +178,15 @@ describe("ObserveModule: beside instrumentation-http", () => {
     );
     expect(serverSpans()).toHaveLength(1);
 
-    const operation = spanNamed(trace, "GET /orders/:id");
+    const { server, operation } = split(trace, "GET /orders/:id");
     expect(operation.attributes).toMatchObject({
       "http.request.method": "GET",
       "http.route": "/orders/:id",
       "http.response.status_code": 200,
     });
+    // Handed the route the way its own Express instrumentation would, the
+    // SDK names its span after it rather than the bare method.
+    expect(server.attributes["http.route"]).toBe("/orders/:id");
   });
 
   it("leaves extraction to the SDK, and correlates on the trace it continued", async () => {
@@ -159,9 +196,8 @@ describe("ObserveModule: beside instrumentation-http", () => {
       .set("traceparent", `00-${traceId}-00f067aa0ba902b7-01`)
       .expect(200);
 
-    const trace = await spans.traceOf("GET /trace-id");
-    const server = spanNamed(trace, "GET");
-    const operation = spanNamed(trace, "GET /trace-id");
+    const trace = await serverTrace("GET /trace-id");
+    const { server, operation } = split(trace, "GET /trace-id");
     expect(server.spanContext().traceId).toBe(traceId);
     expect(parentIdOf(server)).toBe("00f067aa0ba902b7");
     // Under the SDK's span, not beside it as a second child of the caller.
@@ -172,16 +208,16 @@ describe("ObserveModule: beside instrumentation-http", () => {
   it("puts the SDK's client span under the handler that made the call", async () => {
     await request(app.getHttpServer()).get("/chain").expect(200);
 
-    const trace = fromServer(await spans.traceOf("GET /chain"));
+    const trace = await serverTrace("GET /chain");
     // One trace, two SERVER spans - one per inbound request - and the call
     // between them recorded once, by the SDK, under the calling handler.
     expect(spanTree(trace)).toBe(
       [
-        "SERVER GET",
+        "SERVER GET /chain",
         "  INTERNAL GET /chain",
         "    INTERNAL OrdersController.chain",
         "      CLIENT GET",
-        "        SERVER GET",
+        "        SERVER GET /orders/:id",
         "          INTERNAL GET /orders/:id",
         "            INTERNAL OrdersController.findOne",
         "              INTERNAL OrdersService.list",

@@ -227,7 +227,12 @@ export class OtelSpanRecorder extends SpanRecorder {
     }
 
     this.names.set(root, described.name);
-    const operation = new OtelOperation(this, root, start);
+    const operation = new OtelOperation(
+      this,
+      root,
+      start,
+      foreign && httpRpcMetadata(parentContext),
+    );
     this.operations.set(root, operation);
     store?.set(OPERATION_KEY, operation);
     return this.within(root, parentContext, () => fn(operation));
@@ -675,6 +680,8 @@ class OtelOperation implements OperationHandle {
     private readonly recorder: OtelSpanRecorder,
     readonly root: Otel.Span,
     readonly start: OperationStart,
+    /** The foreign SERVER span's route slot, when one is waiting for it. */
+    private readonly rpcMetadata?: RpcMetadata,
   ) {
     this.hasOperationId = start.operationId !== undefined;
   }
@@ -684,6 +691,12 @@ class OtelOperation implements OperationHandle {
       return;
     }
     this.root.setAttribute("http.route", path);
+    // instrumentation-http names its SERVER span and sets `http.route` from
+    // this when the response ends - what its Express and Nest instrumentations
+    // do for it, and the only way to reach a span it alone will end.
+    if (this.rpcMetadata && this.rpcMetadata.route === undefined) {
+      this.rpcMetadata.route = path;
+    }
     const method = this.start.attributes?.method;
     this.recorder.setName(this.root, method ? `${method} ${path}` : path);
   }
@@ -835,6 +848,30 @@ function describeOperation(
     kind: api.SpanKind.SERVER,
     attributes,
   };
+}
+
+/**
+ * `@opentelemetry/core`'s RPC metadata, as `instrumentation-http` leaves it in
+ * the context of an inbound request. Read through the key's registered symbol
+ * rather than core's helpers, which are not a dependency of this package.
+ */
+interface RpcMetadata {
+  type: string | number;
+  route?: string;
+}
+
+/** `RPCType.HTTP` in `@opentelemetry/core`. */
+const RPC_TYPE_HTTP = "http";
+
+const RPC_METADATA_KEY = Symbol.for(
+  "OpenTelemetry SDK Context Key RPC_METADATA",
+);
+
+function httpRpcMetadata(context: Otel.Context): RpcMetadata | undefined {
+  const metadata = context.getValue(RPC_METADATA_KEY) as
+    | RpcMetadata
+    | undefined;
+  return metadata?.type === RPC_TYPE_HTTP ? metadata : undefined;
 }
 
 function isHttp(start: OperationStart): boolean {
