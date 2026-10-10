@@ -59,6 +59,8 @@ export class Summary<TLabel extends string = typeof DEFAULT_LABEL>
 
   private _tags?: Record<string, string>;
   private _onChange?: (self: Summary<TLabel>) => void;
+  /** Each admitted observation, for a histogram fed one value at a time. */
+  private _onObserve?: (value: number, label: TLabel | undefined) => void;
   private _lastUpdated: number = Date.now();
   private readonly _sampleSize: number;
 
@@ -219,6 +221,7 @@ export class Summary<TLabel extends string = typeof DEFAULT_LABEL>
     this.sample(key, value, count);
     this._lastUpdated = Date.now();
 
+    this._onObserve?.(value, label);
     if (this._onChange) {
       this._onChange(this);
     }

@@ -1,4 +1,4 @@
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Optional } from "@nestjs/common";
 import { AsyncLocalStorage } from "async_hooks";
 import { ObserveAgentSharedBuffer } from "../agent/observe-agent.shared-buffer.js";
 import { Gauge, GaugeKind, Summary } from "../custom-metrics/index.js";
@@ -8,6 +8,7 @@ import { TraceSpanDelegate } from "../trace-span.delegate.js";
 import { KeyOf } from "../types/key-of.type.js";
 import { Path, PathValue } from "../types/path-value.type.js";
 import { OBSERVE_OPTIONS } from "../observe.constants.js";
+import { OtelMetrics } from "../metrics/otel-metrics.js";
 import { SpanRecorder } from "../recorder/span-recorder.js";
 
 @Injectable()
@@ -31,6 +32,7 @@ export class TracerService<
     private readonly observeAgentSharedBuffer: ObserveAgentSharedBuffer,
     @Inject(OBSERVE_OPTIONS)
     private readonly options: ObserveModuleOptionsWithDefaults,
+    @Optional() private readonly otelMetrics?: OtelMetrics,
   ) {}
 
   /**
@@ -355,6 +357,10 @@ export class TracerService<
   private registerCounterChangeHandler<TLabel extends string>(
     counter: Counter<TLabel>,
   ): void {
+    if (this.otelMetrics) {
+      this.otelMetrics.register(counter);
+      return;
+    }
     counter["_onChange"] = (self: Counter<TLabel>) => {
       this.observeAgentSharedBuffer.upsertCustomMetric(self);
     };
@@ -363,6 +369,10 @@ export class TracerService<
   private registerGaugeChangeHandler<TLabel extends string>(
     gauge: Gauge<TLabel>,
   ): void {
+    if (this.otelMetrics) {
+      this.otelMetrics.register(gauge);
+      return;
+    }
     gauge["_onChange"] = (self: Gauge<TLabel>) => {
       this.observeAgentSharedBuffer.upsertCustomMetric(self);
     };
@@ -371,6 +381,10 @@ export class TracerService<
   private registerSummaryChangeHandler<TLabel extends string>(
     summary: Summary<TLabel>,
   ): void {
+    if (this.otelMetrics) {
+      this.otelMetrics.register(summary);
+      return;
+    }
     summary["_onChange"] = (self: Summary<TLabel>) => {
       this.observeAgentSharedBuffer.upsertCustomMetric(self);
     };

@@ -4,6 +4,7 @@ import {
   Logger,
   OnApplicationShutdown,
   OnModuleInit,
+  Optional,
 } from "@nestjs/common";
 import { hostname } from "node:os";
 import { Worker } from "worker_threads";
@@ -15,6 +16,7 @@ import {
   setActiveSliceRecorder,
   SpanSliceRecorder,
 } from "../profiling/span-slice-recorder.js";
+import { OtelMetrics } from "../metrics/otel-metrics.js";
 import { NodeRuntimeMetricsService } from "../services/node-runtime-metrics.service.js";
 import { parseDegradedMessage } from "./degraded-ingest.protocol.js";
 import {
@@ -65,6 +67,7 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
   private isTerminating = false;
   private flushInterval: NodeJS.Timeout;
   private runtimeMetricsInterval: NodeJS.Timeout | null = null;
+  private stopOtelRuntimeMetrics: (() => void) | null = null;
   private cpuProfiler: CpuProfilerService | null = null;
 
   constructor(
@@ -72,6 +75,7 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
     @Inject(OBSERVE_OPTIONS)
     private readonly options: ObserveModuleOptionsWithDefaults,
     private readonly nodeRuntimeMetricsService: NodeRuntimeMetricsService,
+    @Optional() private readonly otelMetrics?: OtelMetrics,
   ) {}
 
   onModuleInit() {
@@ -101,7 +105,13 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
     }
     this.flushInterval = setInterval(() => this.flush(), flushIntervalTime);
 
-    if (!this.hasScaffoldCredentials) {
+    if (this.otelMetrics) {
+      // Read by the application's metric reader, not shipped from here - so
+      // whether the collector credentials are real makes no difference.
+      if (this.options.runtimeMetrics) {
+        this.stopOtelRuntimeMetrics = this.otelMetrics.startRuntime();
+      }
+    } else if (!this.hasScaffoldCredentials) {
       this.startRuntimeMetrics();
     }
 
@@ -221,6 +231,8 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
     if (this.runtimeMetricsInterval) {
       clearInterval(this.runtimeMetricsInterval);
     }
+    this.stopOtelRuntimeMetrics?.();
+    this.stopOtelRuntimeMetrics = null;
 
     if (this.cpuProfiler) {
       setActiveSliceRecorder(null);

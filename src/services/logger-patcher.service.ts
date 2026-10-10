@@ -5,10 +5,13 @@ import {
   Logger,
   LogLevel,
   OnModuleInit,
+  Optional,
 } from "@nestjs/common";
 import { AsyncLocalStorage } from "async_hooks";
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/observe-options.interface.js";
 import { OBSERVE_OPTIONS } from "../observe.constants.js";
+import { OtelSpanRecorder } from "../recorder/otel-span-recorder.js";
+import { SpanRecorder } from "../recorder/span-recorder.js";
 
 @Injectable()
 export class LoggerPatcherService implements OnModuleInit {
@@ -19,6 +22,7 @@ export class LoggerPatcherService implements OnModuleInit {
     private readonly asyncLocalStorage: AsyncLocalStorage<any>,
     @Inject(OBSERVE_OPTIONS)
     private readonly options: ObserveModuleOptionsWithDefaults,
+    @Optional() private readonly spanRecorder?: SpanRecorder,
   ) {}
 
   onModuleInit() {
@@ -45,6 +49,13 @@ export class LoggerPatcherService implements OnModuleInit {
 
     const options = this.options;
     const asyncLocalStorage = this.asyncLocalStorage;
+    // With OpenTelemetry a JSON line also names its span, so a backend can
+    // place it in the trace's waterfall. Not without: the registry's span ids
+    // never leave the snapshot.
+    const spanRecorder =
+      this.spanRecorder instanceof OtelSpanRecorder
+        ? this.spanRecorder
+        : undefined;
     const originalFormatMessage = ConsoleLogger.prototype["formatMessage"];
     const originalGetJsonLogObject =
       ConsoleLogger.prototype["getJsonLogObject"];
@@ -81,6 +92,10 @@ export class LoggerPatcherService implements OnModuleInit {
         // Not a field Nest models on the returned object, which is the whole
         // point of the patch.
         (jsonLogObject as Record<string, unknown>)["traceId"] = requestId;
+        const spanId = spanRecorder?.currentSpanId();
+        if (spanId) {
+          (jsonLogObject as Record<string, unknown>)["spanId"] = spanId;
+        }
       }
       return jsonLogObject;
     };
