@@ -24,6 +24,7 @@ import {
   ObserveModuleOptionsWithDefaults,
   ObserveOptionsFactory,
   ObserveOptions,
+  ObserveOptionsFor,
 } from "./interfaces/observe-options.interface.js";
 import { CALLER_METADATA_KEY, OBSERVE_OPTIONS } from "./observe.constants.js";
 import { GraphQLObserveAgentService } from "./protocols/graphql-observe-agent.service.js";
@@ -131,6 +132,52 @@ function withServiceVersion<
 }
 
 /**
+ * With `opentelemetry`, forwarded logs are the one signal still shipped to
+ * the Observe collector, and they need what it identifies a service by. Asked
+ * for without it, forwarding is switched off with a warning rather than
+ * failing every batch with a 401 or a rejected payload.
+ */
+function withLogForwarding<
+  Options extends Pick<
+    ObserveModuleOptionsWithDefaults,
+    "opentelemetry" | "forwardLogs" | "appKey" | "appSecret" | "serviceId"
+  >,
+>(options: Options): Options {
+  if (
+    !options.opentelemetry ||
+    !options.forwardLogs ||
+    (options.appKey && options.appSecret && options.serviceId)
+  ) {
+    return options;
+  }
+  new Logger("ObserveModule").warn(
+    "forwardLogs is switched off: with opentelemetry, forwarded logs still go to the Observe collector, which needs appKey, appSecret and serviceId. " +
+      "Give all three, or collect logs through your OpenTelemetry pipeline instead.",
+  );
+  return { ...options, forwardLogs: false };
+}
+
+/**
+ * Every options object `resolveOptions` produced. It is a provider like any
+ * other, so it reaches the instance decorator - which must leave it alone:
+ * its hooks (`traceIdGenerator`, the `ignore`s) run as the agents open an
+ * operation, and wrapped they become steps of whatever span is active then,
+ * such as the SERVER span of an `instrumentation-http` beside us.
+ */
+const resolvedOptions = new WeakSet<object>();
+
+/** The options `forRoot` and `forRootAsync` hand the module, resolved. */
+function resolveOptions(
+  options: ObserveModuleOptionsWithDefaults,
+): ObserveModuleOptionsWithDefaults {
+  const resolved = withLogForwarding(
+    withServiceVersion(withServiceId(options)),
+  );
+  resolvedOptions.add(resolved);
+  return resolved;
+}
+
+/**
  * `@opentelemetry/api`, loaded only when `opentelemetry` is switched on so
  * every other application can leave the peer out.
  */
@@ -149,9 +196,13 @@ function loadOpenTelemetryApi(): OpenTelemetryApi {
   return loaded.module;
 }
 
-export function createObserveModule<Store extends Record<string, unknown>>(
-  options: CreateObserveModuleOptions = {},
-) {
+export function createObserveModule<
+  Store extends Record<string, unknown>,
+  const Options extends CreateObserveModuleOptions = CreateObserveModuleOptions,
+>(options: Options = {} as Options) {
+  /** What `forRoot` takes: credentials are optional with `opentelemetry`. */
+  type ModeOptions = ObserveOptionsFor<Options>;
+
   options.traceIdKey ??= "traceId";
   options.attachTraceIdToLogs ??= true;
   options.traceIdGenerator ??= defaultTraceIdGenerator;
@@ -293,25 +344,25 @@ export function createObserveModule<Store extends Record<string, unknown>>(
       readonly options: ObserveModuleOptionsWithDefaults,
     ) {}
 
-    static forRoot(observeOpts: ObserveOptions): DynamicModule {
+    static forRoot(observeOpts: ModeOptions): DynamicModule {
       return {
         global: true,
         module: ObserveModule,
         providers: [
           {
             provide: OBSERVE_OPTIONS,
-            useValue: withServiceVersion(
-              withServiceId({
-                ...options,
-                ...observeOpts,
-              }),
-            ),
+            useValue: resolveOptions({
+              ...options,
+              ...observeOpts,
+            } as ObserveModuleOptionsWithDefaults),
           },
         ],
       };
     }
 
-    static forRootAsync(options: ObserveModuleAsyncOptions): DynamicModule {
+    static forRootAsync(
+      options: ObserveModuleAsyncOptions<ModeOptions>,
+    ): DynamicModule {
       return {
         module: ObserveModule,
         global: options.global ?? true,
@@ -324,7 +375,7 @@ export function createObserveModule<Store extends Record<string, unknown>>(
     }
 
     static createAsyncProviders(
-      asyncOptions: ObserveModuleAsyncOptions,
+      asyncOptions: ObserveModuleAsyncOptions<ModeOptions>,
     ): Provider[] {
       if (asyncOptions.useExisting || asyncOptions.useFactory) {
         return [this.createAsyncOptionsProvider(asyncOptions)];
@@ -343,7 +394,7 @@ export function createObserveModule<Store extends Record<string, unknown>>(
     }
 
     static createAsyncOptionsProvider(
-      asyncOptions: ObserveModuleAsyncOptions,
+      asyncOptions: ObserveModuleAsyncOptions<ModeOptions>,
     ): Provider {
       const useFactory = asyncOptions.useFactory;
       if (useFactory) {
@@ -351,12 +402,10 @@ export function createObserveModule<Store extends Record<string, unknown>>(
           provide: OBSERVE_OPTIONS,
           useFactory: async (...args: any[]) => {
             const opts = await useFactory(...args);
-            return withServiceVersion(
-              withServiceId({
-                ...options,
-                ...opts,
-              }),
-            );
+            return resolveOptions({
+              ...options,
+              ...opts,
+            } as ObserveModuleOptionsWithDefaults);
           },
           inject: asyncOptions.inject || [],
         };
@@ -368,13 +417,13 @@ export function createObserveModule<Store extends Record<string, unknown>>(
       }
       return {
         provide: OBSERVE_OPTIONS,
-        useFactory: async (optionsFactory: ObserveOptionsFactory) =>
-          withServiceVersion(
-            withServiceId({
-              ...options,
-              ...(await optionsFactory.createObserveOptions()),
-            }),
-          ),
+        useFactory: async (
+          optionsFactory: ObserveOptionsFactory<ModeOptions>,
+        ) =>
+          resolveOptions({
+            ...options,
+            ...(await optionsFactory.createObserveOptions()),
+          } as ObserveModuleOptionsWithDefaults),
         inject: [optionsFactoryToken],
       };
     }
@@ -393,8 +442,11 @@ export function createObserveModule<Store extends Record<string, unknown>>(
             | OperationTraceRegistry
             | RegistrySpanRecorder,
         ) ||
+        resolvedOptions.has(instance as object) ||
         instance instanceof TraceSamplerService ||
         instance instanceof TracerService ||
+        // Registers custom metrics from inside the handlers that create them.
+        instance instanceof OtelMetrics ||
         instance instanceof ObserveAgentSharedBuffer ||
         // Consulted as each request's snapshot is buffered: agent bookkeeping,
         // not application code.

@@ -33,11 +33,15 @@ describe("ObserveAgentWorker options", () => {
 
   let worker: ObserveAgentWorker;
 
-  const build = (options: Partial<ObserveModuleOptionsWithDefaults>) => {
+  const build = (
+    options: Partial<ObserveModuleOptionsWithDefaults>,
+    otelMetrics?: { startRuntime: () => () => void },
+  ) => {
     worker = new ObserveAgentWorker(
       sharedBuffer as never,
       { serviceId: "svc", ...options } as ObserveModuleOptionsWithDefaults,
       metrics as never,
+      otelMetrics as never,
     );
     // The worker thread and the profiler are out of scope here; only the
     // option resolution is under test.
@@ -242,6 +246,50 @@ describe("ObserveAgentWorker options", () => {
 
       expect(worker.initializeWorker).toHaveBeenCalled();
       expect(log).not.toHaveBeenCalled();
+    });
+  });
+
+  // Spans and metrics leave through the application's SDK, so the collector
+  // only hears from this process if logs are forwarded to it.
+  describe("with opentelemetry", () => {
+    const flushArmed = () =>
+      Boolean((worker as unknown as { flushInterval: unknown }).flushInterval);
+
+    it("starts no worker, flush timer or collector metrics", () => {
+      const stop = vi.fn();
+      const startRuntime = vi.fn(() => stop);
+      build({ opentelemetry: true, runtimeMetrics: true }, { startRuntime });
+      worker.onModuleInit();
+
+      expect(worker.initializeWorker).not.toHaveBeenCalled();
+      expect(flushArmed()).toBe(false);
+      expect(runtimeMetricsStarted()).toBe(false);
+      expect(startRuntime).toHaveBeenCalledOnce();
+    });
+
+    it("stops the meter's runtime metrics at shutdown", async () => {
+      const stop = vi.fn();
+      build(
+        { opentelemetry: true, runtimeMetrics: true },
+        { startRuntime: () => stop },
+      ).onModuleInit();
+
+      await worker.onApplicationShutdown();
+      expect(stop).toHaveBeenCalledOnce();
+    });
+
+    it("starts the worker for forwarded logs, but still no collector metrics", () => {
+      build({
+        opentelemetry: true,
+        forwardLogs: true,
+        runtimeMetrics: true,
+        appKey: "key",
+        appSecret: "secret",
+      }).onModuleInit();
+
+      expect(worker.initializeWorker).toHaveBeenCalled();
+      expect(flushArmed()).toBe(true);
+      expect(runtimeMetricsStarted()).toBe(false);
     });
   });
 });
