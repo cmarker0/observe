@@ -44,6 +44,7 @@ import {
 } from "./recorder/otel-span-recorder.js";
 import { RegistrySpanRecorder } from "./recorder/registry-span-recorder.js";
 import { SpanRecorder } from "./recorder/span-recorder.js";
+import { OtelMetrics } from "./metrics/otel-metrics.js";
 import { resolveSkipSpans } from "./services/skip-spans.util.js";
 import { StdoutForwarderService } from "./services/stdout-forwarder.service.js";
 import { TraceSamplerService } from "./services/trace-sampler.service.js";
@@ -170,18 +171,19 @@ export function createObserveModule<Store extends Record<string, unknown>>(
   );
   // Built here for the same reason as the registry: the instrumentation hook
   // needs it before the DI container exists.
-  const spanRecorder: RegistrySpanRecorder | OtelSpanRecorder =
-    options.opentelemetry
-      ? new OtelSpanRecorder(asyncLocalStorage, loadOpenTelemetryApi(), {
-          ...(typeof options.opentelemetry === "object" &&
-            options.opentelemetry),
-          traceIdKey: options.traceIdKey,
-        })
-      : new RegistrySpanRecorder(
-          asyncLocalStorage,
-          operationTraceRegistry,
-          options.traceIdKey,
-        );
+  const otelApi = options.opentelemetry ? loadOpenTelemetryApi() : undefined;
+  const otelSettings =
+    typeof options.opentelemetry === "object" ? options.opentelemetry : {};
+  const spanRecorder: RegistrySpanRecorder | OtelSpanRecorder = otelApi
+    ? new OtelSpanRecorder(asyncLocalStorage, otelApi, {
+        ...otelSettings,
+        traceIdKey: options.traceIdKey,
+      })
+    : new RegistrySpanRecorder(
+        asyncLocalStorage,
+        operationTraceRegistry,
+        options.traceIdKey,
+      );
 
   @Module({
     imports: [DiscoveryModule],
@@ -242,6 +244,16 @@ export function createObserveModule<Store extends Record<string, unknown>>(
           TraceSamplerService,
         ],
       },
+      // Only in OpenTelemetry mode. The services that report metrics take it
+      // as optional, and report to the collector without it.
+      ...(otelApi
+        ? [
+            {
+              provide: OtelMetrics,
+              useValue: new OtelMetrics(otelApi, otelSettings.meterProvider),
+            },
+          ]
+        : []),
       TracerService,
       LoggerPatcherService,
       HttpObserveAgentService,

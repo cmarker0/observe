@@ -4,6 +4,7 @@ import {
   Logger,
   OnApplicationShutdown,
   OnModuleInit,
+  Optional,
 } from "@nestjs/common";
 import * as os from "node:os";
 import {
@@ -16,6 +17,7 @@ import {
 } from "node:perf_hooks";
 import { NodeRuntimeMetrics } from "../interfaces/node-runtime-metrics.interface.js";
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/observe-options.interface.js";
+import { OtelMetrics } from "../metrics/otel-metrics.js";
 import { OBSERVE_OPTIONS } from "../observe.constants.js";
 
 type GcBreakdown = NonNullable<NodeRuntimeMetrics["gc"]["breakdown"]>;
@@ -89,12 +91,15 @@ export class NodeRuntimeMetricsService
   constructor(
     @Inject(OBSERVE_OPTIONS)
     private readonly options: ObserveModuleOptionsWithDefaults,
+    @Optional() private readonly otelMetrics?: OtelMetrics,
   ) {
     this.options.runtimeMetrics ??= true;
   }
 
   onModuleInit() {
-    if (!this.options.runtimeMetrics) {
+    // With OpenTelemetry, `OtelMetrics` monitors the runtime itself; nothing
+    // here would ever be collected.
+    if (!this.options.runtimeMetrics || this.otelMetrics) {
       return;
     }
 

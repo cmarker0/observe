@@ -65,6 +65,11 @@ export interface TracerSource {
   getTracer(name: string, version?: string): unknown;
 }
 
+/** An OpenTelemetry `MeterProvider`, typed loosely for the same reason. */
+export interface MeterSource {
+  getMeter(name: string, version?: string): unknown;
+}
+
 /**
  * An OpenTelemetry `TextMapPropagator`, typed loosely so this file does not
  * need `@opentelemetry/api`, an optional peer.
@@ -179,13 +184,13 @@ export interface CreateObserveModuleOptions {
       };
 
   /**
-   * Records spans through the OpenTelemetry API instead of shipping trace
-   * snapshots to the Observe collector. Requires `@opentelemetry/api`.
+   * Records spans and metrics through the OpenTelemetry API instead of
+   * shipping them to the Observe collector. Requires `@opentelemetry/api`.
    *
-   * The application owns the SDK: register a tracer provider (and with it a
-   * context manager, exporter and resource) before the Nest application is
-   * created. Spans then go wherever that provider exports them; metrics and
-   * forwarded logs still go to the collector.
+   * The application owns the SDK: register a tracer provider and a meter
+   * provider (and with them a context manager, exporters and resource) before
+   * the Nest application is created. Spans and metrics then go wherever those
+   * providers export them; forwarded logs still go to the collector.
    *
    * Operations become SERVER spans (CONSUMER for jobs and message
    * transports), instrumented providers INTERNAL spans named `Class.method`.
@@ -207,8 +212,21 @@ export interface CreateObserveModuleOptions {
    *   counterparts (`instrumentation-http`, `-undici`) duplicate
    *   `outgoing.http`; switch one of them off.
    *
+   * Metrics go through the Meter API instead of to the collector:
+   * - `TracerService` counters and gauges become asynchronous counters and
+   *   gauges, summaries histograms.
+   * - `runtimeMetrics` reports event loop, heap, GC, CPU and memory under
+   *   semantic-convention names - those `instrumentation-runtime-node` uses,
+   *   so run one or the other. `runtimeMetricsInterval` does not apply: the
+   *   application's metric reader decides when to collect.
+   *
+   * Log lines keep their trace correlation (see `logCorrelation`), and JSON
+   * lines gain a `spanId`. Forwarded logs (`forwardLogs`) still go to the
+   * collector.
+   *
    * Options:
    * - `tracerProvider`: a provider other than the global one.
+   * - `meterProvider`: a meter provider other than the global one.
    * - `propagator`: a propagator other than the global one.
    * - `logCorrelation`: what log lines correlate on - see `LogCorrelation`.
    *   Defaults to `"trace-id"`.
@@ -218,6 +236,7 @@ export interface CreateObserveModuleOptions {
     | boolean
     | {
         tracerProvider?: TracerSource;
+        meterProvider?: MeterSource;
         propagator?: PropagatorSource;
         logCorrelation?: LogCorrelation;
       };
