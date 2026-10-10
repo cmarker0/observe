@@ -150,6 +150,8 @@ part. Where to look next, if overhead matters:
 
 ## Semantic-convention gaps (not fixed)
 
+All but the last are fixed since; see `semconv-gaps-notes.md`.
+
 - Job roots have no `messaging.system`. The recorder does not know the
   driver; the queue agents could pass it.
 - gRPC SERVER spans have no `rpc.grpc.status_code`. The end hook gets

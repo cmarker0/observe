@@ -720,13 +720,15 @@ describe("ObserveModule with OpenTelemetry: a trace from HTTP into a microservic
         "    INTERNAL MathService.add",
       ].join("\n"),
     );
-    // Hung from the caller's handler, through the client that sent it.
-    const ancestry = ancestryOf(trace, server);
-    expect(ancestry.slice(-2)).toEqual([
+    // Hung straight from the caller's handler: the client's own plumbing
+    // (`createPacket`, `publish`, `connect`) is not application code.
+    expect(ancestryOf(trace, server)).toEqual([
       "ApiController.overLoopback",
       "GET /loopback",
     ]);
-    expect(ancestry[0]).toMatch(/^LoopbackClient\./);
+    expect(
+      trace.filter((span) => span.name.startsWith("LoopbackClient.")),
+    ).toEqual([]);
     expect(server.attributes).toMatchObject({
       "rpc.system": "loopback",
       [ObserveAttributes.PROTOCOL]: "LOOPBACK",
@@ -801,7 +803,7 @@ describe("ObserveModule with OpenTelemetry: a trace from HTTP into a microservic
     expect(trace.map((span) => span.name)).not.toContain(
       "LoopbackClient.onDispatchHook",
     );
-    expect(ancestryOf(trace, server)[0]).toBe("LoopbackClient.createPacket");
+    expect(ancestryOf(trace, server)[0]).toBe("ApiController.overLoopback");
   });
 
   it.runIf(frameworkCarriesMetadata)(

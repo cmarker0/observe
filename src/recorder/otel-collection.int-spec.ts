@@ -219,14 +219,14 @@ describe("ObserveModule: OpenTelemetry recording", () => {
   it("hangs resolvers and their providers under the GraphQL step of the request", async () => {
     await request(app.getHttpServer())
       .post("/graphql")
-      .send({ query: "{ orders { id } }" })
+      .send({ query: "query RecentOrders { orders { id } }" })
       .expect(200);
 
     const spans = await traceOf("POST");
     const root = named(spans, "POST");
     expect(root.attributes).toMatchObject({
       "graphql.operation.type": "query",
-      "graphql.operation.name": "orders",
+      "graphql.operation.name": "RecentOrders",
     });
 
     const operation = named(spans, "OrdersResolver.orders");

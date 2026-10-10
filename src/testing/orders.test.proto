@@ -12,6 +12,8 @@ service Orders {
   rpc Decline (OrderById) returns (Order) {}
   rpc ExplodeAsync (OrderById) returns (Order) {}
   rpc RejectAsync (OrderById) returns (Order) {}
+  rpc Missing (OrderById) returns (Order) {}
+  rpc Unavailable (OrderById) returns (Order) {}
 }
 
 message OrderById {

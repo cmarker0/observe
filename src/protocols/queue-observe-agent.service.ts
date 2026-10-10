@@ -69,6 +69,7 @@ export class QueueObserveAgentService<Store extends Record<string, unknown>> {
       queueName: job.queueName,
       name: job.name,
       id: job.id,
+      system: "bullmq",
       opts: job.opts as Record<string, unknown> | undefined,
       metadata: this.readQueueMetadata(job),
     };

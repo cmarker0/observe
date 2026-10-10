@@ -8,6 +8,7 @@ import {
   ReadableSpan,
   SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
+import { RpcException } from "@nestjs/microservices";
 import { AsyncLocalStorage } from "async_hooks";
 import type { ObserveModuleOptionsWithDefaults } from "../interfaces/index.js";
 import { JOB_TRACE_OPTION_KEY } from "../observe.constants.js";
@@ -129,6 +130,7 @@ describe("OtelSpanRecorder", () => {
                 kind: "job",
                 correlationId: "req-1",
                 job: { queueName: "emails", name: "welcome", id: "7" },
+                messagingSystem: "bullmq",
               },
               (operation) => {
                 step("send");
@@ -144,6 +146,7 @@ describe("OtelSpanRecorder", () => {
       const job = span("process emails");
       expect(job.kind).toBe(api.SpanKind.CONSUMER);
       expect(job.attributes).toMatchObject({
+        "messaging.system": "bullmq",
         "messaging.destination.name": "emails",
         "messaging.message.id": "7",
         [ObserveAttributes.JOB_NAME]: "welcome",
@@ -275,6 +278,118 @@ describe("OtelSpanRecorder", () => {
   });
 
   describe("errors", () => {
+    it("records the error a job's driver reported on the run itself", async () => {
+      inStore("job-1", () =>
+        recorder.runOperation(
+          {
+            kind: "job",
+            correlationId: "job-1",
+            job: { queueName: "emails", name: "welcome", id: "7" },
+          },
+          (operation) => {
+            step("send");
+            // `done(err)`: the handler returned, so no step threw it.
+            operation!.end(() => ({
+              status: "failed",
+              error: new TypeError("mailbox full password=hunter2"),
+            }));
+          },
+        ),
+      );
+      await flush();
+
+      const job = span("process emails");
+      expect(job.status.code).toBe(api.SpanStatusCode.ERROR);
+      expect(job.attributes["error.type"]).toBe("TypeError");
+      const [event] = job.events;
+      expect(event.name).toBe("exception");
+      expect(event.attributes!["exception.type"]).toBe("TypeError");
+      expect(JSON.stringify(event.attributes)).not.toContain("hunter2");
+    });
+
+    it("does not record a thrown error on the run a second time", async () => {
+      const error = new Error("send failed");
+      await inStore("job-1", () =>
+        recorder.runOperation(
+          { kind: "job", correlationId: "job-1", job: { queueName: "q" } },
+          async (operation) => {
+            await recorder
+              .runStep({ className: "Svc", methodKey: "send" }, async () => {
+                throw error;
+              })
+              .catch(() => undefined);
+            operation!.end(() => ({ status: "failed", error }));
+          },
+        ),
+      );
+      await flush();
+
+      expect(span("process q").events).toEqual([]);
+      expect(span("Svc.send").events).toHaveLength(1);
+      expect(span("process q").status.code).toBe(api.SpanStatusCode.ERROR);
+    });
+
+    describe("gRPC status code", () => {
+      const grpcCall = async (thrown?: unknown) => {
+        await inStore("grpc-1", () =>
+          recorder.runOperation(
+            {
+              kind: "request",
+              correlationId: "grpc-1",
+              protocol: "GRPC",
+              operationId: "FindOne",
+              rpcService: "hero.HeroService",
+            },
+            async (operation) => {
+              await recorder
+                .runStep(
+                  { className: "Hero", methodKey: "findOne" },
+                  async () => {
+                    if (thrown !== undefined) {
+                      throw thrown;
+                    }
+                    return "ok";
+                  },
+                )
+                .catch(() => undefined);
+              operation!.end();
+            },
+          ),
+        );
+        await flush();
+        return span("hero.HeroService/FindOne");
+      };
+
+      it("answers OK when nothing escaped the handler", async () => {
+        const root = await grpcCall();
+        expect(root.attributes["rpc.grpc.status_code"]).toBe(0);
+        expect(root.status.code).toBe(api.SpanStatusCode.UNSET);
+      });
+
+      it("takes the code an RpcException carries, leaving a client error unset", async () => {
+        const root = await grpcCall(
+          new RpcException({ code: 5, message: "no such hero" }),
+        );
+        expect(root.attributes["rpc.grpc.status_code"]).toBe(5);
+        expect(root.status.code).toBe(api.SpanStatusCode.UNSET);
+      });
+
+      it("fails the call on a code that is the server's failure", async () => {
+        const root = await grpcCall(
+          Object.assign(new Error("down"), { code: 14 }),
+        );
+        expect(root.attributes["rpc.grpc.status_code"]).toBe(14);
+        expect(root.status.code).toBe(api.SpanStatusCode.ERROR);
+      });
+
+      it("answers UNKNOWN for an error without a code, as grpc-js sends it", async () => {
+        const root = await grpcCall(new Error("boom"));
+        expect(root.attributes["rpc.grpc.status_code"]).toBe(2);
+        expect(root.status.code).toBe(api.SpanStatusCode.ERROR);
+        expect(root.attributes["error.type"]).toBe("Error");
+      });
+    });
+
     it("records a thrown error redacted, and fails the operation it escaped", async () => {
       await inStore("req-1", () =>
         recorder.runOperation(
@@ -431,6 +546,7 @@ describe("OtelSpanRecorder", () => {
               correlationId: "gql-1",
               protocol: "graphql",
               operationId: "Query.orders",
+              operationName: "RecentOrders",
             },
             (handle) => handle,
           )!;
@@ -452,7 +568,8 @@ describe("OtelSpanRecorder", () => {
       const root = span("Query.orders");
       expect(root.attributes).toMatchObject({
         "graphql.operation.type": "query",
-        "graphql.operation.name": "orders",
+        // The document's name for the operation, not the root field.
+        "graphql.operation.name": "RecentOrders",
       });
       expect(parentOf(span("OrdersResolver.orders"))).toBe(idOf(root));
       expect(parentOf(span("Svc.load"))).toBe(

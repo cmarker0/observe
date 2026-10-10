@@ -373,3 +373,38 @@ function isNameChar(char: string): boolean {
 function isIgnored(char: string): boolean {
   return char === " " || char === "\t" || char === "\n" || char === "\r";
 }
+
+/**
+ * Whether a document parses, by `graphql`'s own `parse`, remembered per
+ * document the way `parseGraphQLOperation` remembers its labels.
+ *
+ * The scan above reads only as far as the first field, so a document with a
+ * syntax error later on still gets a label - and an operation span for a
+ * resolver that the server will never run. `parse` is the server's own
+ * verdict; a client's fixed set of queries pays for it once each.
+ */
+export function createSyntaxCheck(
+  parse: (document: string) => unknown,
+): (document: string) => boolean {
+  const verdicts = new Map<string, boolean>();
+  return (document) => {
+    const known = verdicts.get(document);
+    if (known !== undefined) {
+      return known;
+    }
+    let wellFormed: boolean;
+    try {
+      parse(document);
+      wellFormed = true;
+    } catch {
+      wellFormed = false;
+    }
+    if (document.length <= MAX_CACHEABLE_DOCUMENT_LENGTH) {
+      if (verdicts.size >= CACHE_LIMIT) {
+        verdicts.delete(verdicts.keys().next().value as string);
+      }
+      verdicts.set(document, wellFormed);
+    }
+    return wellFormed;
+  };
+}

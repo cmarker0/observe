@@ -51,10 +51,21 @@ export interface OperationStart {
    * (`package.Service`), which `operationId` - the bare method - leaves out.
    */
   rpcService?: string;
+  /**
+   * GraphQL only: the name the document gave the operation
+   * (`query CreateOrder { ... }`), which `operationId` - the root field -
+   * leaves out. Absent for an anonymous operation.
+   */
+  operationName?: string;
   tags?: Tags;
   attributes?: { method?: string; originalUrl?: string };
   /** Job runs only: queue, name, id and driver metadata. */
   job?: Partial<JobSnapshot>;
+  /**
+   * Job runs only: the queue driver, as `messaging.system` names it -
+   * `bullmq`, `bull`. Absent for runs no broker delivered (`@Cron`).
+   */
+  messagingSystem?: string;
   /**
    * The inbound fields a caller's trace context may ride in: HTTP headers,
    * packet or gRPC metadata, the context stamped on a job when it was
@@ -77,6 +88,12 @@ export interface OperationEnd {
   userId?: string;
   status?: JobStatus;
   /**
+   * Why a job failed, when the driver reported it rather than the handler
+   * throwing it - a callback handler's `done(err)`. A thrown error is already
+   * on the step that threw.
+   */
+  error?: unknown;
+  /**
    * Asked once the operation is complete, with what it is reported with;
    * returns the request to attach, or `undefined` for none. Lets the HTTP
    * agent keep its capture rules without ever holding the finished snapshot.
@@ -97,6 +114,8 @@ export interface OperationHandle {
    */
   annotate(update: {
     operationId: string;
+    /** See `OperationStart.operationName`. */
+    operationName?: string;
     tags?: Tags;
     attributes?: { originalUrl?: string };
   }): void;

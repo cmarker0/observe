@@ -474,7 +474,12 @@ export function createObserveModule<
         // `onRequestEnd` methods invoke the hooks this module registers, so
         // instrumenting it would wrap the agent's own bookkeeping in spans
         // inside every operation it measures.
-        isResolverDecoratorHost(instance)
+        isResolverDecoratorHost(instance) ||
+        // A microservice client's own plumbing - `connect`, `createSocket`,
+        // `publish`, `serializer.serialize` - is transport machinery, not
+        // application code, and every call through it would add a run of
+        // spans between the handler and the call it made.
+        isClientProxy(instance)
       );
     } catch {
       // An instance that throws on inspection - `instanceof` runs its
@@ -580,4 +585,28 @@ function isResolverDecoratorHost(instance: unknown): boolean {
     typeof candidate.setDecorator === "function" &&
     typeof candidate.setOnRequestStartHook === "function"
   );
+}
+
+type ClientProxyClass = abstract new (...args: never[]) => unknown;
+
+/** Loaded once, on first use: `null` when the package is not installed. */
+let clientProxyClass: ClientProxyClass | null | undefined;
+
+/**
+ * Whether `instance` is a `@nestjs/microservices` client, built-in or custom:
+ * every one extends `ClientProxy`. The package is an optional peer, so it is
+ * loaded the first time a provider is inspected, and never again.
+ */
+function isClientProxy(instance: unknown): boolean {
+  if (typeof instance !== "object" || instance === null) {
+    return false;
+  }
+  if (clientProxyClass === undefined) {
+    const loaded = loadOptionalPeer<{ ClientProxy?: ClientProxyClass }>(
+      "@nestjs/microservices",
+    );
+    clientProxyClass =
+      (loaded.installed && loaded.module?.ClientProxy) || null;
+  }
+  return clientProxyClass !== null && instance instanceof clientProxyClass;
 }

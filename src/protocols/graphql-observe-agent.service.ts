@@ -11,6 +11,7 @@ import {
 } from "../recorder/span-recorder.js";
 import { KeyOf } from "../types/key-of.type.js";
 import {
+  createSyntaxCheck,
   parseGraphQLOperation,
   toResolveInfoLike,
 } from "./graphql-operation-parser.js";
@@ -119,6 +120,11 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
    * after the schema is built.
    */
   private resolverIndex: Map<string, ResolverHandler> | undefined;
+  /**
+   * `graphql`'s verdict on a document, once the package is loaded. Unset,
+   * every document the scan can label is measured, as before.
+   */
+  private isWellFormed: ((document: string) => boolean) | undefined;
 
   constructor(
     private readonly asyncLocalStorage: AsyncLocalStorage<
@@ -143,6 +149,11 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
 
   async onModuleInit(): Promise<void> {
     await this.registerRequestHooksIfPossible();
+    // Here rather than beside the hooks, which the constructor may already
+    // have registered: this is awaited before the app takes a request.
+    if (this.isPatched) {
+      this.isWellFormed ??= await this.loadSyntaxCheck();
+    }
   }
 
   async registerRequestHooksIfPossible(): Promise<void> {
@@ -202,6 +213,23 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
   }
 
   /**
+   * `graphql` is a peer of `@nestjs/graphql` itself, so it is there whenever
+   * the host is; should it fail to load, documents go unchecked.
+   */
+  private async loadSyntaxCheck(): Promise<
+    ((document: string) => boolean) | undefined
+  > {
+    try {
+      const { parse } = (await import("graphql")) as {
+        parse?: (document: string) => unknown;
+      };
+      return typeof parse === "function" ? createSyntaxCheck(parse) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Opens a span for the operation about to be processed.
    *
    * Returns the state the end hook needs, or `undefined` for an operation this
@@ -215,7 +243,10 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
    */
   onRequestStart(ctx: GqlRequestStartContext): OperationState | undefined {
     const parsed = parseGraphQLOperation(ctx.query);
-    if (!parsed) {
+    // A document that does not parse never reaches a resolver: the server
+    // answers with a syntax error, and a span for its first field would
+    // report a resolver call that never happened.
+    if (!parsed || this.isWellFormed?.(ctx.query!) === false) {
       return undefined;
     }
     const operationName = parsed.operationName ?? ctx.operationName;
@@ -243,9 +274,21 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
     // A trace id in the store means a transport agent in front already owns
     // this operation - recorded or not.
     if (this.asyncLocalStorage.getStore()?.get(this.options.traceIdKey)) {
-      return this.startWithinRequest(operationId, attributes, info, ctx);
+      return this.startWithinRequest(
+        operationId,
+        operationName,
+        attributes,
+        info,
+        ctx,
+      );
     }
-    return this.startAsOperation(operationId, attributes, info, ctx);
+    return this.startAsOperation(
+      operationId,
+      operationName,
+      attributes,
+      info,
+      ctx,
+    );
   }
 
   /**
@@ -287,6 +330,7 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
    */
   private startWithinRequest(
     operationId: string,
+    operationName: string | undefined,
     attributes: { originalUrl?: string },
     info: GraphQLResolveInfoLike,
     ctx: GqlRequestStartContext,
@@ -294,6 +338,7 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
     this.applyAttributes(info, ctx.context);
     this.spanRecorder.currentOperation()?.annotate({
       operationId,
+      operationName,
       tags: this.options.graphql?.tags,
       attributes,
     });
@@ -325,6 +370,7 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
    */
   private startAsOperation(
     operationId: string,
+    operationName: string | undefined,
     attributes: { originalUrl?: string },
     info: GraphQLResolveInfoLike,
     ctx: GqlRequestStartContext,
@@ -347,6 +393,7 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
         correlationId: traceId,
         protocol: GRAPHQL_PROTOCOL,
         operationId,
+        operationName,
         tags: this.options.graphql?.tags,
         attributes,
         sampling: ["graphql", { operationId }],

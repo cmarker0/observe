@@ -276,6 +276,7 @@ describe.skipIf(!redisReachable)(
       expect(run.parentSpanContext).toBeUndefined();
       expect(run.status.code).toBe(api.SpanStatusCode.UNSET);
       expect(run.attributes).toMatchObject({
+        "messaging.system": "bullmq",
         "messaging.operation.type": "process",
         "messaging.destination.name": MQ_QUEUE,
         "messaging.message.id": expect.any(String),
@@ -557,6 +558,11 @@ class BullMailProcessor {
   callback(_job: BullJob, done: (error?: Error | null) => void) {
     setTimeout(() => done(), 20);
   }
+
+  @Process("callback-failing-mail")
+  callbackFailing(_job: BullJob, done: (error?: Error | null) => void) {
+    setTimeout(() => done(new RangeError("mailbox full")), 5);
+  }
 }
 
 @Controller()
@@ -672,6 +678,7 @@ describe.skipIf(!redisReachable)(
         spanIdOf(spanNamed(http, "Queue.add")),
       ]);
       expect(run.attributes).toMatchObject({
+        "messaging.system": "bull",
         "messaging.operation.type": "process",
         "messaging.destination.name": BULL_QUEUE,
         "messaging.message.id": expect.any(String),
@@ -769,6 +776,32 @@ describe.skipIf(!redisReachable)(
       expect(
         exceptionOf(spanNamed(trace, "BullMailProcessor.failing")),
       ).toMatchObject({ "exception.message": "deliberate" });
+      // On the processor's span, where it was thrown - not again on the run.
+      expect(attempts[1].events).toEqual([]);
+    });
+
+    /**
+     * The handler returned before failing, so no span saw the error: it
+     * reached the driver through `done`, and belongs on the run.
+     */
+    it("records the error a callback-style processor passed to `done` on the run", async () => {
+      await queue.add("callback-failing-mail", {});
+
+      const [run] = await bullRunsOf("callback-failing-mail");
+      expect(run.status).toEqual({
+        code: api.SpanStatusCode.ERROR,
+        message: "mailbox full",
+      });
+      expect(run.attributes["error.type"]).toBe("RangeError");
+      expect(exceptionOf(run)).toMatchObject({
+        "exception.type": "RangeError",
+        "exception.message": "mailbox full",
+      });
+      const handler = spanNamed(
+        traceOfSpan(run),
+        "BullMailProcessor.callbackFailing",
+      );
+      expect(handler.status.code).toBe(api.SpanStatusCode.UNSET);
     });
 
     /**
@@ -889,7 +922,8 @@ describe("ObserveModule: @nestjs/schedule handlers as OpenTelemetry spans", () =
       [ObserveAttributes.JOB_NAME]: "TasksService.nightlyReport",
       environment: "test",
     });
-    // A timer has no queue: no attempts, no wait.
+    // A timer has no queue: no broker, no attempts, no wait.
+    expect(run.attributes).not.toHaveProperty("messaging.system");
     expect(run.attributes).not.toHaveProperty(
       ObserveAttributes.JOB_ATTEMPTS_MADE,
     );
